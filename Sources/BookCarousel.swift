@@ -1,13 +1,15 @@
 import SwiftUI
 
 /// 居中的书架：中间一本最大，两侧依次缩小并淡出。
-/// 左右滑动切换，点中间的打开，长按或上滑弹出菜单。
+/// 左右滑动切换，点中间的打开，长按弹出菜单。
 struct BookCarousel: View {
     let books: [Book]
     @Binding var index: Int
 
     let onOpen: (Book) -> Void
-    let onSwipeUp: (Book) -> Void
+    let onCover: (Book) -> Void
+    let onRename: (Book) -> Void
+    let onDelete: (Book) -> Void
 
     @State private var dragOffset: CGFloat = 0
 
@@ -74,22 +76,21 @@ struct BookCarousel: View {
                     }
                 }
             }
-            // 上滑 → 弹出「菜单 / 编辑 / 删除」
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 24)
-                    .onEnded { value in
-                        let dy = value.translation.height
-                        let dx = value.translation.width
-                        if dy < -50, abs(dy) > abs(dx) * 1.4 {
-                            onSwipeUp(book)
-                        }
-                    }
-            )
             .contextMenu {
                 Button {
-                    onSwipeUp(book)
+                    onCover(book)
                 } label: {
-                    Label("更多操作", systemImage: "ellipsis.circle")
+                    Label("更换封面", systemImage: "paintpalette")
+                }
+                Button {
+                    onRename(book)
+                } label: {
+                    Label("重命名", systemImage: "pencil")
+                }
+                Button(role: .destructive) {
+                    onDelete(book)
+                } label: {
+                    Label("删除", systemImage: "trash")
                 }
             }
     }
