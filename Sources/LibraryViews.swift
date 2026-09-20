@@ -10,8 +10,8 @@ struct LibraryView: View {
     @State private var renameTitle = ""
     @State private var showSettings = false
     @State private var coverEditingBook: Book?
-
-    private let columns = [GridItem(.adaptive(minimum: 152, maximum: 220), spacing: 26)]
+    @State private var carouselIndex = 0
+    @State private var openBookID: UUID?
 
     var body: some View {
         NavigationStack {
@@ -19,7 +19,7 @@ struct LibraryView: View {
                 if library.books.isEmpty {
                     emptyState
                 } else {
-                    bookGrid
+                    carouselShelf
                 }
             }
             .navigationTitle("我的书架")
@@ -64,7 +64,11 @@ struct LibraryView: View {
             .alert("新建画册", isPresented: $showNewBookAlert) {
                 TextField("画册名称", text: $newBookTitle)
                 Button("取消", role: .cancel) {}
-                Button("创建") { library.createBook(title: newBookTitle) }
+                Button("创建") {
+                    let created = library.createBook(title: newBookTitle)
+                    carouselIndex = 0
+                    _ = created
+                }
             }
             .alert("重命名画册", isPresented: renameAlertBinding) {
                 TextField("画册名称", text: $renameTitle)
@@ -80,6 +84,9 @@ struct LibraryView: View {
                 }
             }
         }
+        .onChange(of: library.books.count) { count in
+            carouselIndex = min(max(carouselIndex, 0), max(count - 1, 0))
+        }
     }
 
     private var renameAlertBinding: Binding<Bool> {
@@ -89,36 +96,43 @@ struct LibraryView: View {
         )
     }
 
-    private var bookGrid: some View {
-        ScrollView {
-            LazyVGrid(columns: columns, spacing: 30) {
-                ForEach(library.books) { book in
-                    NavigationLink(value: book.id) {
-                        BookCoverCell(book: book)
-                    }
-                    .buttonStyle(.plain)
-                    .contextMenu {
-                        Button {
-                            coverEditingBook = book
-                        } label: {
-                            Label("更换封面", systemImage: "paintpalette")
-                        }
-                        Button {
-                            bookToRename = book
-                            renameTitle = book.title
-                        } label: {
-                            Label("重命名", systemImage: "pencil")
-                        }
-                        Button(role: .destructive) {
-                            library.delete(book)
-                        } label: {
-                            Label("删除", systemImage: "trash")
-                        }
-                    }
-                }
-            }
-            .padding(24)
+    // MARK: - 居中书架
+
+    private var carouselShelf: some View {
+        VStack(spacing: 0) {
+            BookCarousel(books: library.books,
+                         index: $carouselIndex,
+                         onOpen: { book in
+                             openBookID = book.id
+                         },
+                         onCover: { book in
+                             coverEditingBook = book
+                         },
+                         onRename: { book in
+                             bookToRename = book
+                             renameTitle = book.title
+                         },
+                         onDelete: { book in
+                             library.delete(book)
+                         })
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .background(
+            NavigationLink(
+                isActive: Binding(
+                    get: { openBookID != nil },
+                    set: { if !$0 { openBookID = nil } }
+                ),
+                destination: {
+                    if let id = openBookID {
+                        BookReaderView(bookID: id)
+                    }
+                },
+                label: { EmptyView() }
+            )
+            .opacity(0)
+            .frame(width: 0, height: 0)
+        )
     }
 
     private var emptyState: some View {
@@ -137,14 +151,13 @@ struct LibraryView: View {
     }
 }
 
-// MARK: - 书架格子
+// MARK: - 书架格子（列表样式，留给以后备用）
 
 struct BookCoverCell: View {
     let book: Book
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            // 用单元格的真实宽度驱动封面尺寸，列宽变化时封面自动跟着变
             GeometryReader { geo in
                 NotebookCoverView(book: book, width: geo.size.width)
             }
