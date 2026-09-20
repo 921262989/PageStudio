@@ -32,8 +32,14 @@ struct BookReaderView: View {
     @State private var isDraggingPage = false
     @State private var dragStartPosition: Double = 0
 
-    private let pageTurnDistanceFactor: CGFloat = 0.32
-    private let minPageTurnDistance: CGFloat = 140
+    private let pageTurnDistanceFactor: CGFloat = 0.20
+    private let minPageTurnDistance: CGFloat = 96
+    /// 松手时跨越超过这么多页，就不做逐页动画，直接落位
+    private let longJumpThreshold: Double = 3.0
+
+    /// 快速定位中（拖进度条 / 一次跨很多页）：画面降级成「白纸 + 页码」，
+    /// 中间页面完全不渲染，防卡顿、防内存爆掉
+    @State private var fastJumpActive = false
 
     @State private var isPenActive = false
     @State private var activeTool: ActiveTool = .brush(.pen)
@@ -171,7 +177,6 @@ struct BookReaderView: View {
                 }
             } else {
                 activePopover = nil
-                layerStore.objectWillChange.send()
             }
         }
         .alert("提示",
@@ -256,6 +261,8 @@ struct BookReaderView: View {
         ZStack {
             if book.pages.isEmpty {
                 emptyHint
+            } else if fastJumpActive {
+                quickJumpScene(book: book, size: size)
             } else if from + 1 < count && !(isPenActive && frac < 0.002) {
                 spreadOrSingleFlipping(book: book,
                                        size: size,
@@ -269,6 +276,44 @@ struct BookReaderView: View {
         .contentShape(Rectangle())
         .gesture(turnGesture(size: size, book: book))
         .simultaneousGesture(edgeTapGesture(available: available, book: book))
+    }
+
+    /// 快速定位时的降级画面：只画一张白纸 + 位置文字。
+    /// 拖进度条 / 一次跨很多页时走这里，中间页面完全不渲染，
+    /// 既不掉帧，也不会因为同时挂着几十个页面视图把内存撑爆。
+    @ViewBuilder
+    private func quickJumpScene(book: Book, size: ReaderSize) -> some View {
+        VStack(spacing: 12) {
+            Image(systemName: "book.pages")
+                .font(.system(size: 38))
+                .foregroundStyle(Color.black.opacity(0.28))
+            Text(unitLabel(at: position, book: book))
+                .font(.system(size: 18, weight: .semibold).monospacedDigit())
+                .foregroundStyle(Color.black.opacity(0.45))
+        }
+        .frame(width: size.containerWidth, height: size.containerHeight)
+        .background(PaperView(theme: theme))
+        .clipShape(RoundedRectangle(cornerRadius: bookCornerRadius,
+                                    style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: bookCornerRadius, style: .continuous)
+                .stroke(PaperStyle.border, lineWidth: 0.5)
+        )
+    }
+
+    /// 把 0 / 1 / 2… 的位置值翻译成「跨页 3-4」或「第 5 / 120 页」
+    private func unitLabel(at value: Double, book: Book) -> String {
+        if viewMode == .spread {
+            let count = max(SpreadLayout.spreads(for: book).count, 1)
+            let idx = min(max(Int(value.rounded()), 0), count - 1)
+            let start = idx * 2 + 1
+            let end = min(start + 1, book.pages.count)
+            return "跨页 \(start)-\(end)"
+        } else {
+            let count = max(book.pages.count, 1)
+            let idx = min(max(Int(value.rounded()), 0), count - 1)
+            return "第 \(idx + 1) / \(book.pages.count) 页"
+        }
     }
 
     private var emptyHint: some View {
@@ -642,14 +687,24 @@ struct BookReaderView: View {
             },
             onDrawingStateChanged: { _ in },
             onPickColor: { picked in
-                penColor = picked
-                draftColor = picked
-                if activeTool.isEraser {
-                    activeTool = .brush(.pen)
+                // ⚠️ 必须异步：这个回调可能发生在 UIView 构建过程中，
+                //    同步写 @State 会触发 "Modifying state during view update" 崩溃
+                DispatchQueue.main.async {
+                    penColor = picked
+                    draftColor = picked
+                    if activeTool.isEraser {
+                        activeTool = .brush(.pen)
+                    }
                 }
             },
             onZoomChanged: { level in
-                zoomLevel = level
+                // ⚠️ 必须异步 + 去重：scrollView 设置 zoomScale 时会立刻回调，
+                //    同步写 zoomLevel 就是「点编辑闪退」的元凶
+                DispatchQueue.main.async {
+                    if abs(zoomLevel - level) > 0.005 {
+                        zoomLevel = level
+                    }
+                }
             }
         )
         .frame(width: displayViewport.width, height: displayViewport.height)
@@ -714,7 +769,7 @@ struct BookReaderView: View {
     private func turnGesture(size: ReaderSize, book: Book) -> some Gesture {
         DragGesture(minimumDistance: 6)
             .onChanged { value in
-                guard pagingEnabled else { return }
+                guard pagingEnabled, !fastJumpActive else { return }
 
                 let dx = value.translation.width
                 let dy = value.translation.height
@@ -749,10 +804,16 @@ struct BookReaderView: View {
                 let predicted = dragStartPosition + predictedDelta
                 let target = min(max(predicted.rounded(), 0), maxPos)
 
-                withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
-                    position = target
+                if abs(target - dragStartPosition) > longJumpThreshold {
+                    // 一次跨太多页：不做逐页动画。
+                    // 逐页动画会让 SwiftUI 把中间每一页都渲染一遍 → 卡顿 + 内存飙升。
+                    quickJump(to: target, book: book)
+                } else {
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+                        position = target
+                    }
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
                 }
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
             }
     }
 
@@ -783,6 +844,7 @@ struct BookReaderView: View {
         let maxPos = Double(max(readerUnitCount(book: book) - 1, 0))
         position = min(max(position, 0), maxPos)
         isDraggingPage = false
+        fastJumpActive = false
     }
 
     private func initialize(container: CGSize) {
@@ -829,11 +891,31 @@ struct BookReaderView: View {
 
     private func jump(toPage pageIdx: Int, book: Book) {
         isDraggingPage = false
-        if viewMode == .spread {
-            position = Double(SpreadLayout.spreadIndex(containingPage: pageIdx,
-                                                       in: book))
+        let target: Double = (viewMode == .spread)
+            ? Double(SpreadLayout.spreadIndex(containingPage: pageIdx, in: book))
+            : Double(pageIdx)
+
+        if abs(target - position) > longJumpThreshold {
+            quickJump(to: target, book: book)
         } else {
-            position = Double(pageIdx)
+            withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+                position = target
+            }
+        }
+    }
+
+    /// 长距离跳页：先切到「白纸 + 页码」的降级画面，瞬间落位，等画面稳了再恢复真实渲染。
+    /// 这样从第 1 页一次跳到第 300 页，也只渲染两个画面，不卡、不爆内存。
+    private func quickJump(to target: Double, book: Book) {
+        let maxPos = Double(max(readerUnitCount(book: book) - 1, 0))
+        let clamped = min(max(target, 0), maxPos)
+
+        fastJumpActive = true
+        position = clamped
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+            fastJumpActive = false
         }
     }
 
@@ -844,40 +926,88 @@ struct BookReaderView: View {
         let count = readerUnitCount(book: book)
         let current = currentUnit(book: book)
 
-        HStack(spacing: 14) {
-            Button {
-                withAnimation(.spring(response: 0.34, dampingFraction: 0.88)) {
-                    position = max(position - 1, 0)
+        VStack(spacing: 4) {
+            scrubber(book: book)
+
+            HStack(spacing: 14) {
+                Button {
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.88)) {
+                        position = max(position - 1, 0)
+                    }
+                } label: {
+                    Image(systemName: "chevron.backward")
+                        .font(.system(size: 13, weight: .semibold))
                 }
-            } label: {
-                Image(systemName: "chevron.backward")
-                    .font(.system(size: 13, weight: .semibold))
-            }
-            .disabled(current <= 0)
+                .disabled(current <= 0)
 
-            Button {
-                withAnimation(.spring(response: 0.34, dampingFraction: 0.88)) {
-                    position = min(position + 1, Double(max(count - 1, 0)))
+                Button {
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.88)) {
+                        position = min(position + 1, Double(max(count - 1, 0)))
+                    }
+                } label: {
+                    Image(systemName: "chevron.forward")
+                        .font(.system(size: 13, weight: .semibold))
                 }
-            } label: {
-                Image(systemName: "chevron.forward")
-                    .font(.system(size: 13, weight: .semibold))
+                .disabled(current >= count - 1)
+
+                Spacer()
+
+                Text(positionText(book: book))
+                    .font(.system(size: 10, weight: .medium).monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.75))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Color.black.opacity(0.38), in: Capsule())
             }
-            .disabled(current >= count - 1)
-
-            Spacer()
-
-            Text(positionText(book: book))
-                .font(.system(size: 10, weight: .medium).monospacedDigit())
-                .foregroundStyle(.white.opacity(0.75))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(Color.black.opacity(0.38), in: Capsule())
+            .buttonStyle(.plain)
+            .foregroundStyle(.white)
+            .padding(.horizontal, 24)
         }
-        .buttonStyle(.plain)
-        .foregroundStyle(.white)
-        .padding(.horizontal, 24)
         .padding(.bottom, 10)
+    }
+
+    /// 整本书的进度条：按住横向拖动 = 直接跳到任意位置，一次能从第一页拖到最后一页。
+    /// 不管你甩得动甩不动，它一步到位。拖动中画面降级成白纸 + 页码，中间页面完全不渲染。
+    @ViewBuilder
+    private func scrubber(book: Book) -> some View {
+        let unitCount = max(readerUnitCount(book: book), 1)
+        let maxPos = Double(max(unitCount - 1, 0))
+        let progress: Double = maxPos > 0
+            ? min(max(position, 0), maxPos) / maxPos
+            : 0
+
+        GeometryReader { geo in
+            let w = max(geo.size.width, 1)
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.white.opacity(0.20))
+                    .frame(height: 3)
+                Capsule()
+                    .fill(Color.white.opacity(0.85))
+                    .frame(width: max(w * CGFloat(progress), 5), height: 3)
+            }
+            .frame(maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        if !fastJumpActive {
+                            fastJumpActive = true
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        }
+                        let ratio = min(max(value.location.x / w, 0), 1)
+                        position = min(max((Double(ratio) * maxPos).rounded(), 0), maxPos)
+                    }
+                    .onEnded { _ in
+                        position = min(max(position.rounded(), 0), maxPos)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                            fastJumpActive = false
+                        }
+                    }
+            )
+        }
+        .frame(height: 20)
+        .padding(.horizontal, 24)
     }
 
     private func positionText(book: Book) -> String {
