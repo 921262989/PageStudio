@@ -736,8 +736,7 @@ struct BookReaderView: View {
     }
 
     /// 当前「看得见的这一页」有哪些页。
-    /// 双页模式下是左页 + 右页两页 —— 之前这里只返回左页，
-    /// 所以「调整本页范围」永远只能调左边那一页。
+    /// 双页模式下是左页 + 右页两页。
     private func visiblePageIndices(book: Book) -> [Int] {
         let total = book.pages.count
         guard total > 0 else { return [] }
@@ -762,7 +761,8 @@ struct BookReaderView: View {
     private func chooseVisiblePage(book: Book,
                                    title: String,
                                    isReplace: Bool) {
-        let indices = visiblePageIndices(book)
+        // ⚠️ 这里必须带参数标签 book:
+        let indices = visiblePageIndices(book: book)
         guard !indices.isEmpty else { return }
 
         if indices.count == 1 {
@@ -1541,7 +1541,6 @@ struct BookReaderView: View {
 
                 Divider()
 
-                // 把照片导入到当前这一页（不新建）
                 Button {
                     if let book {
                         chooseVisiblePage(book: book,
@@ -1552,7 +1551,6 @@ struct BookReaderView: View {
                     Label("导入照片到本页", systemImage: "photo.badge.plus")
                 }
 
-                // 调整本页图片范围（双页模式下可以选左页 / 右页）
                 Button {
                     if let book {
                         chooseVisiblePage(book: book,
