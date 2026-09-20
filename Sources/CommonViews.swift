@@ -1,48 +1,55 @@
 import SwiftUI
 import PencilKit
 
-// MARK: - 纸张 / 装订线 / 背景
+// MARK: - 纸张
 
+/// 一页纸的底色与边缘质感。深色主题下边缘是压暗，浅色主题下也是轻微压暗。
 struct PaperView: View {
+    let theme: ReaderTheme
+
     var body: some View {
         ZStack {
-            Color(red: 0.99, green: 0.985, blue: 0.97)
+            theme.paperColor
+
+            // 纸张左右两侧的微妙明暗，模拟纸的厚度
             LinearGradient(
-                colors: [Color.black.opacity(0.05),
+                colors: [theme.paperEdgeShadow,
                          Color.clear,
                          Color.clear,
-                         Color.black.opacity(0.05)],
+                         theme.paperEdgeShadow],
                 startPoint: .leading,
                 endPoint: .trailing
             )
+            .opacity(0.55)
         }
     }
 }
 
-struct SpineView: View {
+// MARK: - 书脊细线
+
+/// 书脊处的一条细线。不投影、不加宽 —— 只为提示装订位置。
+struct SpineLineView: View {
+    let theme: ReaderTheme
+
     var body: some View {
-        LinearGradient(
-            colors: [.clear,
-                     .black.opacity(0.10),
-                     .black.opacity(0.22),
-                     .black.opacity(0.10),
-                     .clear],
-            startPoint: .leading,
-            endPoint: .trailing
-        )
-        .frame(width: 48)
-        .allowsHitTesting(false)
+        Rectangle()
+            .fill(theme.spineLineColor)
+            .frame(width: 1)
+            .frame(maxHeight: .infinity)
+            .allowsHitTesting(false)
     }
 }
 
+// MARK: - 阅读区背景
+
 struct ReaderBackground: View {
+    let theme: ReaderTheme
+
     var body: some View {
-        LinearGradient(
-            colors: [Color(white: 0.18), Color(white: 0.08)],
-            startPoint: .top,
-            endPoint: .bottom
-        )
-        .ignoresSafeArea()
+        LinearGradient(colors: theme.backgroundColors,
+                       startPoint: .top,
+                       endPoint: .bottom)
+            .ignoresSafeArea()
     }
 }
 
@@ -92,10 +99,10 @@ struct StoredImage<Content: View>: View {
     }
 }
 
-// MARK: - 跨页笔迹渲染
+// MARK: - 跨页笔迹的烘焙图
 
-/// 把某一跨页的笔迹渲染成一张图，叠在底图之上。
-/// 浏览模式下也能看到自己的笔迹（旧版本这里是缺的）。
+/// 把某一跨页的笔迹渲染成一张透明叠图，覆在底图之上。
+/// 浏览模式下也要能看到自己的笔迹（旧版本这里是缺的）。
 struct SpreadDrawingImage: View {
     let book: Book
     let spreadIndex: Int
