@@ -6,7 +6,7 @@ import ImageIO
 
 /// 笔迹的「逻辑坐标系」。
 /// ⚠️ 页高固定 1000 点，与屏幕尺寸完全无关。
-/// 这样转屏、切单页/双页，笔迹坐标都不会漂移。
+/// 这样转屏、切单页 / 双页，笔迹坐标都不会漂移。
 enum DrawingGeometry {
     static let logicalPageHeight: CGFloat = 1000
 
@@ -107,6 +107,20 @@ enum FileStorage {
                                                            isDirectory: true)
         try? FileManager.default.removeItem(at: dir)
     }
+
+    // MARK: PDF 临时文件
+
+    /// PDF 导入时复制进来的临时文件，用完即删，避免 documents 目录越堆越大
+    static func temporaryPDFURL() -> URL {
+        documents.appendingPathComponent("import-\(UUID().uuidString).pdf")
+    }
+
+    static func deleteTemporaryPDF(url: URL) {
+        // 只删我们自己复制进来的，不动用户原始文件
+        guard url.path.hasPrefix(documents.path),
+              url.pathExtension.lowercased() == "pdf" else { return }
+        try? FileManager.default.removeItem(at: url)
+    }
 }
 
 // MARK: - 图片加载
@@ -116,6 +130,15 @@ enum ImageLoader {
     static let cache: NSCache<NSString, UIImage> = {
         let c = NSCache<NSString, UIImage>()
         c.countLimit = 32
+        // 原图解码后很占内存，加个上限，超了自动淘汰最久没用的
+        c.totalCostLimit = 128 * 1024 * 1024
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            c.removeAllObjects()
+        }
         return c
     }()
 
@@ -143,7 +166,8 @@ enum ImageLoader {
         if let cached = cache.object(forKey: name as NSString) { return cached }
         let url = FileStorage.imageURL(named: name)
         guard let image = downsample(url: url, maxPixel: maxPixel) else { return nil }
-        cache.setObject(image, forKey: name as NSString)
+        cache.setObject(image, forKey: name as NSString,
+                        cost: Int(image.size.width * image.size.height * 4))
         return image
     }
 }
