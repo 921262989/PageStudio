@@ -4,6 +4,20 @@ import UniformTypeIdentifiers
 import UIKit
 import PencilKit
 
+// MARK: - 工具弹窗
+
+enum ToolPopover: Identifiable {
+    case brush(PenKind)
+    case eraser
+
+    var id: String {
+        switch self {
+        case .brush(let k): return "brush-\(k.rawValue)"
+        case .eraser:       return "eraser"
+        }
+    }
+}
+
 struct BookReaderView: View {
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var settingsStore: AppSettingsStore
@@ -11,21 +25,19 @@ struct BookReaderView: View {
 
     let bookID: UUID
 
-    // MARK: 阅读位置（连续值）
+    // 阅读位置（连续值）
     @State private var position: Double = 0
     @State private var viewMode: ViewMode = .spread
     @State private var didInitialize = false
 
-    // MARK: 拖拽
+    // 拖拽
     @State private var isDraggingPage = false
     @State private var dragStartPosition: Double = 0
 
-    /// 翻一页需要的滑动距离 = 跨页宽 × 这个系数。
-    /// 数值越小越灵敏。0.32 表示滑 1/3 个跨页宽就翻一页。
     private let pageTurnDistanceFactor: CGFloat = 0.32
     private let minPageTurnDistance: CGFloat = 140
 
-    // MARK: 绘制
+    // 绘制
     @State private var isPenActive = false
     @State private var activeTool: ActiveTool = .brush(.pen)
     @State private var penColor: Color = Color(white: 0.06)
@@ -41,14 +53,15 @@ struct BookReaderView: View {
     @State private var zoomOutTrigger = 0
     @State private var zoomLevel: CGFloat = 1
 
-    @State private var showBrushSettings = false
+    /// 工具弹窗（笔刷设置 / 橡皮设置共用）
+    @State private var activePopover: ToolPopover?
     @State private var brushBarCollapsed = false
     @State private var saveColorPulse = false
 
-    // MARK: 图层
+    // 图层
     @State private var activeLayerIDs: [String: UUID] = [:]
 
-    // MARK: 面板
+    // 面板
     @State private var showThumbnails = false
     @State private var showOutline = false
     @State private var showLayers = false
@@ -56,14 +69,13 @@ struct BookReaderView: View {
 
     @State private var didAutoAppend = false
 
-    // MARK: 导入
+    // 导入
     @State private var showPhotoPicker = false
     @State private var showFileImporter = false
     @State private var photoItems: [PhotosPickerItem] = []
     @State private var importOccupiesSpread = false
     @State private var importMessage: String? = nil
 
-    /// PDF 导入进度：nil = 没有在导入
     @State private var pdfImportProgress: Double? = nil
     @State private var pdfImportTotal = 0
     @State private var pdfImportDone = 0
@@ -165,6 +177,7 @@ struct BookReaderView: View {
                     brushBarCollapsed = false
                 }
             } else {
+                activePopover = nil
                 layerStore.objectWillChange.send()
             }
         }
@@ -200,7 +213,6 @@ struct BookReaderView: View {
             .background(.ultraThinMaterial,
                         in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         }
-        .allowsHitTesting(true)
     }
 
     // MARK: - 主布局
@@ -224,11 +236,18 @@ struct BookReaderView: View {
                     .padding(.bottom, 12)
             }
         }
-        .popover(isPresented: $showBrushSettings, arrowEdge: .bottom) {
-            BrushSettingsPanel(settingsStore: settingsStore,
-                               kind: activeBrushKind,
-                               color: penColor,
-                               onClose: { showBrushSettings = false })
+        .popover(item: $activePopover, arrowEdge: .bottom) { item in
+            switch item {
+            case .brush(let kind):
+                BrushSettingsPanel(settingsStore: settingsStore,
+                                   kind: kind,
+                                   color: penColor,
+                                   onClose: { activePopover = nil })
+            case .eraser:
+                EraserPanel(kind: $eraserKind,
+                            width: $eraserWidth,
+                            onClose: { activePopover = nil })
+            }
         }
     }
 
@@ -247,11 +266,8 @@ struct BookReaderView: View {
             if book.pages.isEmpty {
                 emptyHint
             } else if from + 1 < count && !(isPenActive && frac < 0.002) {
-                // ⚠️ 浏览时**永远**走这一套翻页结构（progress=0 时视觉上就等于静止页）。
-                //    不要在"静止页"和"翻页页"之间切换视图 —— 那种结构切换会把
-                //    卷页动画撕成一段淡入淡出，看起来就像"动画没了"。
-                //
-                //    编辑中且没在翻页时，退回静止场景，好让画布独占那一层笔迹。
+                // 浏览时永远走同一套翻页结构，progress=0 视觉上就等于静止页。
+                // 不要在"静止/翻页"之间切视图 —— 那会把动画撕成淡入淡出。
                 spreadOrSingleFlipping(book: book,
                                        size: size,
                                        from: from,
@@ -279,7 +295,7 @@ struct BookReaderView: View {
         }
     }
 
-    // MARK: - 静止场景（只在最后一跨页 / 编辑停笔时使用）
+    // MARK: - 静止场景
 
     @ViewBuilder
     private func stableScene(book: Book, size: ReaderSize, index: Int) -> some View {
@@ -572,26 +588,26 @@ struct BookReaderView: View {
 
     // MARK: - 绘制画布
 
+    /// ⚠️ 不再用 SwiftUI 的 scaleEffect 缩小画布 ——
+    ///    那会让 UIView 的触摸坐标转发错乱，双指捏合直接失效。
+    ///    现在把「屏幕尺寸」交给 UIScrollView，缩放全部由它原生处理。
     @ViewBuilder
     private func drawingCanvas(book: Book, unitIndex index: Int,
                                size: ReaderSize, spreadIndex: Int,
                                layerID: UUID) -> some View {
         let logical = DrawingGeometry.spreadSize(ratio: book.pageAspectRatio)
-
         let isSingle = (viewMode == .single)
-        let viewport = isSingle
-            ? CGSize(width: logical.width / 2, height: logical.height)
-            : logical
+
+        let displayViewport = isSingle
+            ? CGSize(width: size.pageWidth, height: size.pageHeight)
+            : CGSize(width: size.containerWidth, height: size.containerHeight)
 
         let showRightHalf = isSingle && isRightPage(unitIndex: index, book: book)
-        let initialOffsetX: CGFloat = showRightHalf ? logical.width / 2 : 0
-
-        let displayViewportWidth = size.containerWidth
-        let scale = displayViewportWidth / max(viewport.width, 1)
+        let initialOffsetX: CGFloat = showRightHalf ? (logical.width / 2) : 0
 
         DrawingCanvas(
             canvasSize: logical,
-            viewportSize: viewport,
+            viewportSize: displayViewport,
             initialOffsetX: initialOffsetX,
             displaySize: CGSize(width: size.pageWidth * 2,
                                 height: size.pageHeight),
@@ -635,10 +651,7 @@ struct BookReaderView: View {
                 zoomLevel = level
             }
         )
-        .frame(width: viewport.width, height: viewport.height)
-        .scaleEffect(scale, anchor: .topLeading)
-        .frame(width: size.containerWidth, height: size.containerHeight,
-               alignment: .topLeading)
+        .frame(width: displayViewport.width, height: displayViewport.height)
         .clipped()
     }
 
@@ -693,12 +706,10 @@ struct BookReaderView: View {
         settings.edgeTapTurn && (!isPenActive || settings.pencilOnlyDrawMode)
     }
 
-    /// 翻一页需要滑动的距离
     private func pageTurnDistance(size: ReaderSize) -> CGFloat {
         max(size.containerWidth * pageTurnDistanceFactor, minPageTurnDistance)
     }
 
-    /// 跟手翻页：手指移多少，页面转多少；手指停，页面停。
     private func turnGesture(size: ReaderSize, book: Book) -> some Gesture {
         DragGesture(minimumDistance: 6)
             .onChanged { value in
@@ -732,7 +743,6 @@ struct BookReaderView: View {
                 let turnDistance = pageTurnDistance(size: size)
                 let direction: Double = (book.bindingDirection == .leftToRight) ? -1 : 1
 
-                // 按手指速度预测终点：滑得快 → 多翻几页
                 let predictedDelta = Double(value.predictedEndTranslation.width
                                             / turnDistance) * direction
                 let predicted = dragStartPosition + predictedDelta
@@ -919,16 +929,35 @@ struct BookReaderView: View {
 
     private var expandedBar: some View {
         VStack(spacing: 8) {
+            // 第一行：工具 + 操作
             toolbarRow {
+                // 笔刷：第一次点选中，已是当前笔再点一次 → 弹出设置
                 ForEach(PenKind.allCases) { kind in
                     toolButton(isActive: activeTool == .brush(kind),
                                systemImage: kind.systemImage) {
-                        activeTool = .brush(kind)
+                        if activeTool == .brush(kind) {
+                            activePopover = (activePopover == .brush(kind))
+                                ? nil : .brush(kind)
+                        } else {
+                            activeTool = .brush(kind)
+                            activePopover = nil
+                        }
                     }
                 }
 
                 rowDivider
-                eraserMenu
+
+                // 橡皮：第一次点选中，已是橡皮再点一次 → 弹出类型/大小
+                toolButton(isActive: activeTool.isEraser,
+                           systemImage: eraserKind.systemImage) {
+                    if activeTool.isEraser {
+                        activePopover = (activePopover == .eraser) ? nil : .eraser
+                    } else {
+                        activeTool = .eraser
+                        activePopover = nil
+                    }
+                }
+
                 rowDivider
 
                 toolButton(isActive: false,
@@ -973,6 +1002,7 @@ struct BookReaderView: View {
                 }
             }
 
+            // 第二行：颜色 + 粗细
             toolbarRow {
                 ForEach(PenColorPreset.allCases) { preset in
                     colorDot(preset.color, isSelected: penColor == preset.color) {
@@ -1026,64 +1056,32 @@ struct BookReaderView: View {
 
                 rowDivider
 
-                Button {
-                    showBrushSettings = true
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "slider.horizontal.3")
-                            .font(.system(size: 14))
-                        Text("\(Int(settingsStore.brushSettings(for: activeBrushKind).width))")
-                            .font(.system(size: 12, weight: .medium).monospacedDigit())
-                        Text("·")
-                            .foregroundStyle(.white.opacity(0.4))
-                        Text("\(Int(settingsStore.brushSettings(for: activeBrushKind).opacity * 100))%")
-                            .font(.system(size: 12, weight: .medium).monospacedDigit())
+                // 粗细快捷点
+                ForEach(quickWidths, id: \.self) { w in
+                    Button {
+                        var s = settingsStore.brushSettings(for: activeBrushKind)
+                        s.width = w
+                        settingsStore.updateBrush(s, for: activeBrushKind)
+                    } label: {
+                        Circle()
+                            .fill(Color.white.opacity(0.9))
+                            .frame(width: dotSize(for: w), height: dotSize(for: w))
+                            .frame(width: 26, height: 26)
+                            .background(abs(settingsStore.brushSettings(for: activeBrushKind).width - w) < 0.6
+                                        ? Color.accentColor.opacity(0.25)
+                                        : Color.clear)
+                            .clipShape(RoundedRectangle(cornerRadius: 7))
                     }
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(Color.white.opacity(0.12), in: Capsule())
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
         }
     }
 
-    private var eraserMenu: some View {
-        Menu {
-            Section("橡皮类型") {
-                ForEach(EraserKind.allCases) { k in
-                    Button {
-                        eraserKind = k
-                        activeTool = .eraser
-                    } label: {
-                        Label(k.displayName,
-                              systemImage: eraserKind == k ? "checkmark"
-                                                           : k.systemImage)
-                    }
-                }
-            }
-            Section("橡皮大小") {
-                ForEach(EraserWidth.allCases) { w in
-                    Button {
-                        eraserWidth = w
-                        activeTool = .eraser
-                    } label: {
-                        Label(w.displayName,
-                              systemImage: eraserWidth == w ? "checkmark" : "circle")
-                    }
-                }
-            }
-        } label: {
-            Image(systemName: eraserKind.systemImage)
-                .font(.system(size: 15))
-                .foregroundStyle(.white)
-                .frame(width: 32, height: 32)
-                .background(activeTool.isEraser
-                            ? Color.accentColor.opacity(0.36)
-                            : Color.clear)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-        }
+    private var quickWidths: [Double] { [2, 5, 10, 18, 30] }
+
+    private func dotSize(for width: Double) -> CGFloat {
+        min(max(CGFloat(width) * 0.75, 4), 24)
     }
 
     private var rowDivider: some View {
@@ -1281,7 +1279,6 @@ struct BookReaderView: View {
         appendPages(newPages)
     }
 
-    /// 支持图片 + PDF 混选
     private func importFromFiles(_ result: Result<[URL], Error>) {
         switch result {
         case .failure(let error):
@@ -1299,7 +1296,6 @@ struct BookReaderView: View {
                 let ext = url.pathExtension.lowercased()
 
                 if ext == "pdf" {
-                    // 拷进沙盒，异步渲染时授权还在
                     let dest = FileStorage.documents
                         .appendingPathComponent("import-\(UUID().uuidString).pdf")
                     if (try? FileManager.default.copyItem(at: url, to: dest)) != nil {
@@ -1338,7 +1334,6 @@ struct BookReaderView: View {
         }
     }
 
-    /// 把一个 PDF 逐页渲染并追加到当前画册
     private func importPDFPages(url: URL, occupies: Bool) async {
         let total = PDFImporter.pageCount(url: url)
         guard total > 0 else {
@@ -1500,5 +1495,112 @@ struct BrushSettingsPanel: View {
                 settingsStore.updateBrush(s, for: kind)
             }
         )
+    }
+}
+
+// MARK: - 橡皮面板
+
+struct EraserPanel: View {
+    @Binding var kind: EraserKind
+    @Binding var width: EraserWidth
+    let onClose: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack {
+                Text("橡皮")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    onClose()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+
+            VStack(spacing: 10) {
+                ForEach(EraserKind.allCases) { k in
+                    Button {
+                        kind = k
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: k.systemImage)
+                                .font(.system(size: 18))
+                                .frame(width: 28)
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(k.displayName)
+                                    .font(.subheadline.weight(.medium))
+                                Text(k.descriptionText)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Spacer()
+
+                            if kind == k {
+                                Image(systemName: "checkmark")
+                                    .foregroundStyle(Color.accentColor)
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .background(kind == k
+                                    ? Color.accentColor.opacity(0.12)
+                                    : Color.clear,
+                                    in: RoundedRectangle(cornerRadius: 10))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .stroke(kind == k
+                                        ? Color.accentColor.opacity(0.5)
+                                        : Color.secondary.opacity(0.18),
+                                        lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text("橡皮大小")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.secondary)
+
+                HStack(spacing: 12) {
+                    ForEach(EraserWidth.allCases) { w in
+                        Button {
+                            width = w
+                        } label: {
+                            VStack(spacing: 6) {
+                                Circle()
+                                    .fill(Color.primary.opacity(0.85))
+                                    .frame(width: w.dotSize, height: w.dotSize)
+                                    .frame(width: 44, height: 44)
+                                    .background(width == w
+                                                ? Color.accentColor.opacity(0.18)
+                                                : Color.clear,
+                                                in: RoundedRectangle(cornerRadius: 10))
+                                Text(w.displayName)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
+            Text(kind == .vector
+                 ? "矢量橡皮会整笔删除，大小设置不影响它。"
+                 : "精确橡皮只擦掉笔尖经过的位置。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(20)
+        .frame(width: 330)
     }
 }
