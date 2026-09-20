@@ -1,3 +1,247 @@
-Documents/Drawings/<bookId>/<spreadIndex>/
-    meta.json            ← 图层列表（名字、可见性、不透明度、顺序）
-    <layerId>.drawing    ← 该图层的笔迹
+import SwiftUI
+import PencilKit
+
+// MARK: - 图层元数据
+
+struct LayerMeta: Identifiable, Codable, Hashable {
+    var id: UUID = UUID()
+    var name: String = "图层"
+    var isVisible: Bool = true
+    var opacity: Double = 1.0
+
+    var clampedOpacity: CGFloat {
+        CGFloat(min(max(opacity, 0.0), 1.0))
+    }
+}
+
+// MARK: - 图层存储
+
+final class LayerStore: ObservableObject {
+
+    /// 元数据变更时才自增。笔迹内容变化**不**触发，避免影响绘制性能。
+    @Published private(set) var version: Int = 0
+
+    /// key = "bookId_uuid_spreadIndex"
+    private var registry: [String: [LayerMeta]] = [:]
+    private var drawings: [String: [UUID: PKDrawing]] = [:]
+    private var pendingSaves: [String: DispatchWorkItem] = [:]
+
+    private func key(_ bookId: UUID, _ spreadIndex: Int) -> String {
+        "\(bookId.uuidString)_\(spreadIndex)"
+    }
+
+    // MARK: - 读取
+
+    /// 某一跨页的所有图层（从下到上）。
+    /// 首次访问会从磁盘加载；旧数据会自动迁移成「图层 1」。
+    func layers(bookId: UUID, spreadIndex: Int) -> [LayerMeta] {
+        let k = key(bookId, spreadIndex)
+        if let cached = registry[k] { return cached }
+
+        let loaded = loadMeta(bookId: bookId, spreadIndex: spreadIndex)
+        registry[k] = loaded
+        return loaded
+    }
+
+    func drawing(bookId: UUID, spreadIndex: Int, layerID: UUID) -> PKDrawing {
+        let k = key(bookId, spreadIndex)
+        if let cached = drawings[k]?[layerID] { return cached }
+
+        let url = layerFileURL(bookId: bookId, spreadIndex: spreadIndex, layerID: layerID)
+        let drawing: PKDrawing
+        if let data = try? Data(contentsOf: url),
+           let loaded = try? PKDrawing(data: data) {
+            drawing = loaded
+        } else {
+            drawing = PKDrawing()
+        }
+
+        var dict = drawings[k] ?? [:]
+        dict[layerID] = drawing
+        drawings[k] = dict
+        return drawing
+    }
+
+    /// 是否所有图层都是空的
+    func isEmpty(bookId: UUID, spreadIndex: Int) -> Bool {
+        for meta in layers(bookId: bookId, spreadIndex: spreadIndex) {
+            let d = drawing(bookId: bookId, spreadIndex: spreadIndex, layerID: meta.id)
+            if !d.strokes.isEmpty { return false }
+        }
+        return true
+    }
+
+    // MARK: - 写入
+
+    func setDrawing(_ drawing: PKDrawing,
+                    bookId: UUID,
+                    spreadIndex: Int,
+                    layerID: UUID) {
+        let k = key(bookId, spreadIndex)
+        var dict = drawings[k] ?? [:]
+        dict[layerID] = drawing
+        drawings[k] = dict
+
+        let saveKey = "\(k)_\(layerID.uuidString)"
+        pendingSaves[saveKey]?.cancel()
+
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            let url = self.layerFileURL(bookId: bookId,
+                                        spreadIndex: spreadIndex,
+                                        layerID: layerID)
+            try? drawing.dataRepresentation().write(to: url, options: .atomic)
+            self.pendingSaves[saveKey] = nil
+        }
+        pendingSaves[saveKey] = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
+    }
+
+    func clearLayer(bookId: UUID, spreadIndex: Int, layerID: UUID) {
+        setDrawing(PKDrawing(), bookId: bookId,
+                   spreadIndex: spreadIndex, layerID: layerID)
+
+        // 立刻落盘
+        let url = layerFileURL(bookId: bookId, spreadIndex: spreadIndex, layerID: layerID)
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    // MARK: - 图层增删改
+
+    @discardableResult
+    func addLayer(bookId: UUID, spreadIndex: Int, name: String? = nil) -> LayerMeta {
+        var list = layers(bookId: bookId, spreadIndex: spreadIndex)
+        var meta = LayerMeta()
+        meta.name = name ?? "图层 \(list.count + 1)"
+        list.append(meta)
+
+        commit(list, bookId: bookId, spreadIndex: spreadIndex)
+
+        let k = key(bookId, spreadIndex)
+        var dict = drawings[k] ?? [:]
+        dict[meta.id] = PKDrawing()
+        drawings[k] = dict
+
+        return meta
+    }
+
+    func deleteLayer(_ layerID: UUID, bookId: UUID, spreadIndex: Int) {
+        var list = layers(bookId: bookId, spreadIndex: spreadIndex)
+        guard list.count > 1 else { return }
+        list.removeAll { $0.id == layerID }
+        commit(list, bookId: bookId, spreadIndex: spreadIndex)
+
+        let k = key(bookId, spreadIndex)
+        drawings[k]?.removeValue(forKey: layerID)
+
+        let url = layerFileURL(bookId: bookId, spreadIndex: spreadIndex, layerID: layerID)
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    func rename(_ layerID: UUID, to name: String, bookId: UUID, spreadIndex: Int) {
+        var list = layers(bookId: bookId, spreadIndex: spreadIndex)
+        guard let i = list.firstIndex(where: { $0.id == layerID }) else { return }
+        list[i].name = name
+        commit(list, bookId: bookId, spreadIndex: spreadIndex)
+    }
+
+    func toggleVisibility(_ layerID: UUID, bookId: UUID, spreadIndex: Int) {
+        var list = layers(bookId: bookId, spreadIndex: spreadIndex)
+        guard let i = list.firstIndex(where: { $0.id == layerID }) else { return }
+        list[i].isVisible.toggle()
+        commit(list, bookId: bookId, spreadIndex: spreadIndex)
+    }
+
+    func setVisibility(_ visible: Bool, layerID: UUID, bookId: UUID, spreadIndex: Int) {
+        var list = layers(bookId: bookId, spreadIndex: spreadIndex)
+        guard let i = list.firstIndex(where: { $0.id == layerID }) else { return }
+        list[i].isVisible = visible
+        commit(list, bookId: bookId, spreadIndex: spreadIndex)
+    }
+
+    func setOpacity(_ value: Double, layerID: UUID, bookId: UUID, spreadIndex: Int) {
+        var list = layers(bookId: bookId, spreadIndex: spreadIndex)
+        guard let i = list.firstIndex(where: { $0.id == layerID }) else { return }
+        list[i].opacity = min(max(value, 0), 1)
+        commit(list, bookId: bookId, spreadIndex: spreadIndex)
+    }
+
+    func moveLayer(_ layerID: UUID, up: Bool, bookId: UUID, spreadIndex: Int) {
+        var list = layers(bookId: bookId, spreadIndex: spreadIndex)
+        guard let i = list.firstIndex(where: { $0.id == layerID }) else { return }
+        let j = up ? i + 1 : i - 1
+        guard list.indices.contains(j) else { return }
+        list.swapAt(i, j)
+        commit(list, bookId: bookId, spreadIndex: spreadIndex)
+    }
+
+    // MARK: - 内部
+
+    private func commit(_ list: [LayerMeta], bookId: UUID, spreadIndex: Int) {
+        let k = key(bookId, spreadIndex)
+        registry[k] = list
+        writeMeta(list, bookId: bookId, spreadIndex: spreadIndex)
+        version &+= 1
+    }
+
+    private var drawingsRoot: URL {
+        FileStorage.ensure(FileStorage.documents
+            .appendingPathComponent("Drawings", isDirectory: true))
+    }
+
+    private func spreadDirectory(bookId: UUID, spreadIndex: Int) -> URL {
+        FileStorage.ensure(drawingsRoot
+            .appendingPathComponent(bookId.uuidString, isDirectory: true)
+            .appendingPathComponent("\(spreadIndex)", isDirectory: true))
+    }
+
+    private func metaURL(bookId: UUID, spreadIndex: Int) -> URL {
+        spreadDirectory(bookId: bookId, spreadIndex: spreadIndex)
+            .appendingPathComponent("meta.json")
+    }
+
+    private func layerFileURL(bookId: UUID,
+                              spreadIndex: Int,
+                              layerID: UUID) -> URL {
+        spreadDirectory(bookId: bookId, spreadIndex: spreadIndex)
+            .appendingPathComponent("\(layerID.uuidString).drawing")
+    }
+
+    private func writeMeta(_ list: [LayerMeta], bookId: UUID, spreadIndex: Int) {
+        let url = metaURL(bookId: bookId, spreadIndex: spreadIndex)
+        guard let data = try? JSONEncoder().encode(list) else { return }
+        try? data.write(to: url, options: .atomic)
+    }
+
+    /// 读取图层元数据，并兼容旧版单层笔迹
+    private func loadMeta(bookId: UUID, spreadIndex: Int) -> [LayerMeta] {
+        let url = metaURL(bookId: bookId, spreadIndex: spreadIndex)
+
+        if let data = try? Data(contentsOf: url),
+           let decoded = try? JSONDecoder().decode([LayerMeta].self, from: data),
+           !decoded.isEmpty {
+            return decoded
+        }
+
+        // 旧数据：只有一个 <spreadIndex>.drawing
+        var meta = LayerMeta()
+        meta.name = "图层 1"
+
+        let legacyURL = FileStorage.drawingURL(bookId: bookId,
+                                               spreadIndex: spreadIndex)
+        if FileManager.default.fileExists(atPath: legacyURL.path),
+           let data = try? Data(contentsOf: legacyURL),
+           let legacy = try? PKDrawing(data: data),
+           !legacy.strokes.isEmpty {
+            // 把旧笔迹搬进新图层的文件里
+            let dest = layerFileURL(bookId: bookId,
+                                    spreadIndex: spreadIndex,
+                                    layerID: meta.id)
+            try? data.write(to: dest, options: .atomic)
+            writeMeta([meta], bookId: bookId, spreadIndex: spreadIndex)
+            return [meta]
+        }
+
+        return [meta]
+    }
+}
