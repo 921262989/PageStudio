@@ -19,14 +19,35 @@ struct SettingsView: View {
                         .padding(.horizontal, 2)
                     }
 
-                    LabeledContent("当前主题") {
+                    LabeledContent("当前背景") {
                         Text(settingsStore.settings.readerTheme.displayName)
                             .foregroundStyle(.secondary)
                     }
                 } header: {
-                    Text("外观")
+                    Text("背景颜色")
                 } footer: {
-                    Text("同时改变阅读背景与纸张颜色。深色主题适合夜间阅读。")
+                    Text("只改变纸张背后的桌面颜色。纸张始终是白纸。")
+                }
+
+                // MARK: 手势
+                Section {
+                    Toggle("启用手势", isOn: binding(\.gesturesEnabled))
+
+                    if settingsStore.settings.gesturesEnabled {
+                        Toggle("双指轻点 — 撤回", isOn: binding(\.twoFingerUndo))
+                        Toggle("双指长按 — 连续撤回",
+                               isOn: binding(\.twoFingerLongPressUndo))
+                        Toggle("三指轻点 — 重做", isOn: binding(\.threeFingerRedo))
+                        Toggle("四指轻点 — 清空当前跨页",
+                               isOn: binding(\.fourFingerClear))
+                        Toggle("单指长按 — 吸色", isOn: binding(\.longPressEyedropper))
+                    }
+                } header: {
+                    Text("手势")
+                } footer: {
+                    Text(settingsStore.settings.gesturesEnabled
+                         ? "手势只在编辑模式（画笔已打开）下生效。吸色在「手指也能画」模式下会自动关闭，避免和绘制冲突。"
+                         : "手势已全部关闭。")
                 }
 
                 // MARK: 笔模式
@@ -78,7 +99,7 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - 主题色卡
+    // MARK: - 背景色卡
 
     @ViewBuilder
     private func themeSwatch(_ t: ReaderTheme) -> some View {
@@ -89,38 +110,41 @@ struct SettingsView: View {
         } label: {
             VStack(spacing: 7) {
                 ZStack {
+                    // 桌面背景
                     RoundedRectangle(cornerRadius: 9, style: .continuous)
                         .fill(LinearGradient(colors: t.backgroundColors,
                                              startPoint: .top,
                                              endPoint: .bottom))
                         .frame(width: 62, height: 84)
 
-                    // 中间一张小纸，直观展示纸张色
+                    // 中间一小张白纸（固定白纸，直观展示对比）
                     RoundedRectangle(cornerRadius: 2, style: .continuous)
-                        .fill(t.paperColor)
+                        .fill(PaperStyle.fill)
                         .frame(width: 30, height: 56)
                         .overlay(
                             Rectangle()
-                                .fill(t.spineLineColor)
+                                .fill(PaperStyle.spineLine)
                                 .frame(width: 1, height: 56)
                         )
                 }
                 .overlay(
                     RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .stroke(selected ? Color.accentColor : Color.black.opacity(0.10),
+                        .stroke(selected ? Color.accentColor
+                                         : Color.black.opacity(0.10),
                                 lineWidth: selected ? 2.5 : 1)
                 )
                 .shadow(color: .black.opacity(0.16), radius: 4, y: 2)
 
                 Text(t.displayName)
                     .font(.caption2)
-                    .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                    .foregroundStyle(selected ? Color.accentColor
+                                              : Color.secondary)
             }
         }
         .buttonStyle(.plain)
     }
 
-    // MARK: - Binding 工具
+    // MARK: - Binding
 
     private func binding<T>(_ key: WritableKeyPath<AppSettings, T>) -> Binding<T> {
         Binding(
