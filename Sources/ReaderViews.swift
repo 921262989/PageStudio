@@ -8,20 +8,12 @@ struct PageContentView: View {
     let size: CGSize
     let theme: ReaderTheme
 
-    /// 这本书的内页样式
-    var ruleStyle: PageRuleStyle = .blank
-
     var body: some View {
         // ⚠️ 位移存的是逻辑坐标（页高 = 1000），这里换算成当前屏幕点
         let k = size.height / DrawingGeometry.logicalPageHeight
 
         ZStack {
             PaperView(theme: theme)
-
-            // 内页样式：画在纸上、图片下面
-            if ruleStyle.kind != .none {
-                PageRuleLayer(style: ruleStyle, pageSize: size)
-            }
 
             if let name = page.imageFileName {
                 StoredImage(name: name) { image in
@@ -55,17 +47,12 @@ struct SpreadCanvasView: View {
         CGSize(width: pageWidth * 2, height: pageHeight)
     }
 
-    private var ruleStyle: PageRuleStyle {
-        PageRuleStore.load(for: book.id)
-    }
-
     var body: some View {
         ZStack {
             if let idx = spread.fullSpreadPageIndex, book.pages.indices.contains(idx) {
                 PageContentView(page: book.pages[idx],
                                 size: spreadSize,
-                                theme: theme,
-                                ruleStyle: ruleStyle)
+                                theme: theme)
             } else {
                 let sides = SpreadLayout.visualSides(of: spread,
                                                      binding: book.bindingDirection)
@@ -92,24 +79,17 @@ struct SpreadCanvasView: View {
         if let pageIndex, book.pages.indices.contains(pageIndex) {
             PageContentView(page: book.pages[pageIndex],
                             size: CGSize(width: pageWidth, height: pageHeight),
-                            theme: theme,
-                            ruleStyle: ruleStyle)
+                            theme: theme)
         } else {
-            ZStack {
-                PaperView(theme: theme)
-                if ruleStyle.kind != .none {
-                    PageRuleLayer(style: ruleStyle,
-                                  pageSize: CGSize(width: pageWidth,
-                                                   height: pageHeight))
-                }
-            }
-            .frame(width: pageWidth, height: pageHeight)
+            PaperView(theme: theme)
+                .frame(width: pageWidth, height: pageHeight)
         }
     }
 }
 
 // MARK: - 单页渲染
 
+/// 单页 = 跨页裁一半。翻到同一个跨页的左右页，笔迹位置天然对齐。
 struct SinglePageView: View {
     let book: Book
     let pageIndex: Int
@@ -139,16 +119,8 @@ struct SinglePageView: View {
                                      theme: theme)
                         .offset(x: isRightSide ? -pageWidth : 0)
                 } else {
-                    ZStack {
-                        PaperView(theme: theme)
-                        let rule = PageRuleStore.load(for: book.id)
-                        if rule.kind != .none {
-                            PageRuleLayer(style: rule,
-                                          pageSize: CGSize(width: pageWidth,
-                                                           height: pageHeight))
-                        }
-                    }
-                    .frame(width: pageWidth, height: pageHeight)
+                    PaperView(theme: theme)
+                        .frame(width: pageWidth, height: pageHeight)
                 }
             }
             .clipped()
