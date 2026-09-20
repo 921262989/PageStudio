@@ -1,10 +1,10 @@
 import SwiftUI
 import PhotosUI
 import UniformTypeIdentifiers
+import PencilKit
 
 // MARK: - 单页内容
 
-/// 渲染单个页面槽位的内容：纸张 + 图片（带适配变换）
 struct PageContentView: View {
     let page: Page
     let size: CGSize
@@ -117,14 +117,29 @@ struct SinglePageView: View {
 
 struct BookReaderView: View {
     @EnvironmentObject private var library: LibraryStore
+    @EnvironmentObject private var settingsStore: AppSettingsStore
+    @StateObject private var drawingStore = DrawingStore()
 
     let bookID: UUID
 
-    @State private var spreadIndex = 0
-    @State private var pageIndex = 0
+    // 阅读位置
     @State private var viewMode: ViewMode = .spread
+    @State private var unitIndex = 0
     @State private var didInitialize = false
 
+    // 绘制
+    @State private var isPenActive = false
+    @State private var penKind: PenKind = .pen
+    @State private var penColorEnum: PenColor = .black
+    @State private var penWidth: PenWidth = .medium
+    @State private var undoTrigger = 0
+    @State private var redoTrigger = 0
+    @State private var clearTrigger = 0
+
+    // 自动续页
+    @State private var didAutoAppend = false
+
+    // 导入
     @State private var showPhotoPicker = false
     @State private var showFileImporter = false
     @State private var photoItems: [PhotosPickerItem] = []
@@ -132,19 +147,21 @@ struct BookReaderView: View {
     @State private var importMessage: String? = nil
 
     private var book: Book? { library.book(id: bookID) }
+    private var settings: AppSettings { settingsStore.settings }
 
     var body: some View {
         GeometryReader { geo in
             ZStack {
                 ReaderBackground()
+
                 if let book {
-                    content(for: book, container: geo.size)
+                    mainContent(book: book, container: geo.size)
                 } else {
                     Text("这本画册已被删除")
                         .foregroundStyle(.secondary)
                 }
             }
-            .onAppear { initializeIfNeeded(container: geo.size) }
+            .onAppear { initialize(container: geo.size) }
         }
         .navigationTitle(book?.title ?? "画册")
         .navigationBarTitleDisplayMode(.inline)
@@ -176,40 +193,46 @@ struct BookReaderView: View {
         }
     }
 
-    @ViewBuilder
-    private func content(for book: Book, container: CGSize) -> some View {
-        let spreads = SpreadLayout.spreads(for: book)
-        let clampedSpread = min(max(spreadIndex, 0), max(spreads.count - 1, 0))
-        let clampedPage = min(max(pageIndex, 0), max(book.pages.count - 1, 0))
+    // MARK: - 主内容
 
+    @ViewBuilder
+    private func mainContent(book: Book, container: CGSize) -> some View {
         VStack(spacing: 0) {
-            Spacer(minLength: 12)
+            Spacer(minLength: 8)
 
             if book.pages.isEmpty {
                 emptyHint
-            } else if viewMode == .spread {
-                let size = pageSize(in: container, mode: .spread,
-                                    ratio: book.pageAspectRatio)
-                SpreadView(book: book,
-                           spread: spreads[clampedSpread],
-                           pageWidth: size.width,
-                           pageHeight: size.height)
             } else {
-                let size = pageSize(in: container, mode: .single,
-                                    ratio: book.pageAspectRatio)
-                SinglePageView(book: book,
-                               pageIndex: clampedPage,
-                               pageWidth: size.width,
-                               pageHeight: size.height)
+                let unitCount = readerUnitCount(book: book)
+                let size = readerSize(in: container, book: book)
+
+                CurlPageController(
+                    pageCount: unitCount,
+                    currentIndex: $unitIndex,
+                    onTapLeft: {
+                        guard settings.edgeTapTurn else { return }
+                        goBackward()
+                    },
+                    onTapRight: {
+                        guard settings.edgeTapTurn else { return }
+                        goForward()
+                    }
+                ) { index in
+                    unitView(book: book, unitIndex: index, size: size)
+                }
+                .id("\(viewMode.rawValue)-\(book.pages.count)")
+                .frame(width: size.containerWidth, height: size.containerHeight)
             }
 
-            Spacer(minLength: 12)
-            bottomBar(book: book, spreads: spreads)
+            Spacer(minLength: 8)
+
+            if isPenActive {
+                penToolbar
+            }
+
+            bottomBar(book: book)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .contentShape(Rectangle())
-        .gesture(turnGesture)
-        .simultaneousGesture(edgeTapGesture(container: container))
     }
 
     private var emptyHint: some View {
@@ -223,157 +246,356 @@ struct BookReaderView: View {
                 .font(.footnote)
                 .foregroundStyle(.tertiary)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func pageSize(in container: CGSize, mode: ViewMode, ratio: Double) -> CGSize {
-        let horizontalPadding: CGFloat = (mode == .spread) ? 60 : 90
-        let verticalPadding: CGFloat = 140
+    // MARK: - 阅读单元
+
+    /// 双页模式：一个跨页 = 一个单元；单页模式：一个页面 = 一个单元
+    private func readerUnitCount(book: Book) -> Int {
+        if viewMode == .spread {
+            return SpreadLayout.spreads(for: book).count
+        } else {
+            return book.pages.count
+        }
+    }
+
+    struct ReaderSize {
+        let pageWidth: CGFloat
+        let pageHeight: CGFloat
+        var containerWidth: CGFloat
+        var containerHeight: CGFloat
+    }
+
+    private func readerSize(in container: CGSize, book: Book) -> ReaderSize {
+        let horizontalPadding: CGFloat = (viewMode == .spread) ? 60 : 90
+        let verticalPadding: CGFloat = isPenActive ? 200 : 140
 
         let availableWidth = max(container.width - horizontalPadding, 120)
         let availableHeight = max(container.height - verticalPadding, 120)
-        let slots: CGFloat = (mode == .spread) ? 2 : 1
+        let slots: CGFloat = (viewMode == .spread) ? 2 : 1
 
         var width = availableWidth / slots
-        var height = width * ratio
+        var height = width * book.pageAspectRatio
         if height > availableHeight {
             height = availableHeight
-            width = height / ratio
+            width = height / book.pageAspectRatio
         }
-        return CGSize(width: width, height: height)
+
+        return ReaderSize(
+            pageWidth: width,
+            pageHeight: height,
+            containerWidth: viewMode == .spread ? width * 2 : width,
+            containerHeight: height
+        )
     }
 
-    private var turnGesture: some Gesture {
-        DragGesture(minimumDistance: 24)
-            .onEnded { value in
-                let dx = value.translation.width
-                let dy = value.translation.height
-                guard abs(dx) > abs(dy), abs(dx) > 50 else { return }
-                if shouldTurnForward(dx: dx) {
-                    goForward()
-                } else {
-                    goBackward()
+    @ViewBuilder
+    private func unitView(book: Book, unitIndex index: Int, size: ReaderSize) -> some View {
+        ZStack {
+            // 底图
+            if viewMode == .spread {
+                let spreads = SpreadLayout.spreads(for: book)
+                if spreads.indices.contains(index) {
+                    SpreadView(book: book,
+                               spread: spreads[index],
+                               pageWidth: size.pageWidth,
+                               pageHeight: size.pageHeight)
+                }
+            } else {
+                if book.pages.indices.contains(index) {
+                    SinglePageView(book: book,
+                                   pageIndex: index,
+                                   pageWidth: size.pageWidth,
+                                   pageHeight: size.pageHeight)
                 }
             }
-    }
 
-    private func shouldTurnForward(dx: CGFloat) -> Bool {
-        let direction = book?.bindingDirection ?? .leftToRight
-        return direction == .leftToRight ? (dx < 0) : (dx > 0)
-    }
-
-    private func edgeTapGesture(container: CGSize) -> some Gesture {
-        SpatialTapGesture()
-            .onEnded { value in
-                let edgeWidth = max(container.width / 5, 60)
-                if value.location.x < edgeWidth {
-                    goBackward()
-                } else if value.location.x > container.width - edgeWidth {
-                    goForward()
-                }
+            // 绘制层（跨页尺寸）
+            if isPenActive {
+                drawingLayer(book: book, unitIndex: index, size: size)
+                    .id("\(book.id.uuidString)-\(spreadIndexForUnit(index, book: book))")
             }
+        }
+        .frame(width: size.containerWidth, height: size.containerHeight)
     }
+
+    // MARK: - 绘制层
+
+    @ViewBuilder
+    private func drawingLayer(book: Book, unitIndex index: Int, size: ReaderSize) -> some View {
+        let sIndex = spreadIndexForUnit(index, book: book)
+        let canvasSize = CGSize(width: size.pageWidth * 2, height: size.pageHeight)
+
+        let canvas = DrawingCanvas(
+            canvasSize: canvasSize,
+            initialDrawing: drawingStore.load(bookId: book.id, spreadIndex: sIndex),
+            pencilOnly: settings.pencilOnlyDrawMode,
+            tool: currentTool,
+            undoTrigger: undoTrigger,
+            redoTrigger: redoTrigger,
+            clearTrigger: clearTrigger,
+            onDrawingChanged: { newDrawing in
+                drawingStore.save(newDrawing, bookId: book.id, spreadIndex: sIndex)
+                handleAutoAppend(book: book, spreadIndex: sIndex, drawing: newDrawing)
+            }
+        )
+        .frame(width: canvasSize.width, height: canvasSize.height)
+
+        if viewMode == .spread {
+            canvas
+        } else {
+            // 单页模式：跨页画布只显示一半，坐标完全一致
+            let showRight = isRightPage(unitIndex: index, book: book)
+            ZStack(alignment: .topLeading) {
+                canvas
+                    .offset(x: showRight ? -size.pageWidth : 0)
+            }
+            .frame(width: size.pageWidth, height: size.pageHeight, alignment: .topLeading)
+            .clipped()
+        }
+    }
+
+    private var currentTool: PKTool {
+        switch penKind {
+        case .eraser:
+            return PKEraserTool(.vector)
+        case .pen:
+            return PKInkingTool(.pen,
+                                color: UIColor(penColorEnum.color),
+                                width: penWidth.rawValue)
+        case .marker:
+            return PKInkingTool(.marker,
+                                color: UIColor(penColorEnum.color).withAlphaComponent(0.55),
+                                width: penWidth.rawValue * 2.5)
+        case .pencil:
+            return PKInkingTool(.pencil,
+                                color: UIColor(penColorEnum.color),
+                                width: penWidth.rawValue)
+        }
+    }
+
+    /// 当前单元对应哪个跨页 —— 笔迹按跨页存储
+    private func spreadIndexForUnit(_ index: Int, book: Book) -> Int {
+        if viewMode == .spread {
+            return index
+        } else {
+            return SpreadLayout.spreadIndex(containingPage: index, in: book)
+        }
+    }
+
+    /// 当前页是不是它所属跨页的右页
+    private func isRightPage(unitIndex index: Int, book: Book) -> Bool {
+        let spreads = SpreadLayout.spreads(for: book)
+        guard let spread = spreads.first(where: { $0.pageIndices.contains(index) }) else {
+            return false
+        }
+        let sides = SpreadLayout.visualSides(of: spread, binding: book.bindingDirection)
+        return sides.right == index
+    }
+
+    // MARK: - 自动续页
+
+    private func handleAutoAppend(book: Book, spreadIndex: Int, drawing: PKDrawing) {
+        guard settings.autoAppendPage else { return }
+        guard !drawing.strokes.isEmpty else { return }
+        guard !didAutoAppend else { return }
+
+        let spreads = SpreadLayout.spreads(for: book)
+        guard spreadIndex == spreads.count - 1 else { return }
+
+        var updated = book
+        updated.pages.append(.blank())
+        library.update(updated)
+        didAutoAppend = true
+    }
+
+    // MARK: - 手势 / 翻页
 
     private func goForward() {
         guard let book else { return }
-        let spreads = SpreadLayout.spreads(for: book)
         if viewMode == .spread {
-            let current = min(max(spreadIndex, 0), max(spreads.count - 1, 0))
-            if current + 1 < spreads.count { spreadIndex = current + 1 }
+            let count = SpreadLayout.spreads(for: book).count
+            if unitIndex + 1 < count { unitIndex += 1 }
         } else {
-            if pageIndex + 1 < book.pages.count { pageIndex += 1 }
+            if unitIndex + 1 < book.pages.count { unitIndex += 1 }
         }
     }
 
     private func goBackward() {
+        if unitIndex > 0 { unitIndex -= 1 }
+    }
+
+    private func canGoForward(book: Book) -> Bool {
         if viewMode == .spread {
-            if spreadIndex > 0 { spreadIndex -= 1 }
+            return unitIndex < SpreadLayout.spreads(for: book).count - 1
         } else {
-            if pageIndex > 0 { pageIndex -= 1 }
+            return unitIndex < book.pages.count - 1
         }
     }
 
-    private func canGoForward(book: Book, spreads: [Spread]) -> Bool {
-        if viewMode == .spread {
-            return spreadIndex < spreads.count - 1
-        } else {
-            return pageIndex < book.pages.count - 1
-        }
-    }
-
-    private func canGoBackward(book: Book, spreads: [Spread]) -> Bool {
+    private func canGoBackward(book: Book) -> Bool {
         _ = book
-        _ = spreads
-        return viewMode == .spread ? spreadIndex > 0 : pageIndex > 0
+        return unitIndex > 0
     }
 
     private func clampPosition() {
         guard let book else { return }
-        let spreads = SpreadLayout.spreads(for: book)
-        spreadIndex = min(max(spreadIndex, 0), max(spreads.count - 1, 0))
-        pageIndex = min(max(pageIndex, 0), max(book.pages.count - 1, 0))
+        let count = readerUnitCount(book: book)
+        unitIndex = min(max(unitIndex, 0), max(count - 1, 0))
     }
 
-    private func initializeIfNeeded(container: CGSize) {
+    private func initialize(container: CGSize) {
         guard !didInitialize, let book else { return }
         didInitialize = true
         let isPortrait = container.height > container.width
         viewMode = isPortrait ? .single : book.defaultViewMode
-        spreadIndex = 0
-        pageIndex = 0
+        unitIndex = 0
     }
 
+    /// 单页 / 双页切换，阅读位置正确换算
     private func toggleViewMode() {
         guard let book else { return }
         if viewMode == .spread {
             let spreads = SpreadLayout.spreads(for: book)
-            let current = min(max(spreadIndex, 0), max(spreads.count - 1, 0))
-            if let firstPage = spreads[current].pageIndices.first {
-                pageIndex = firstPage
+            let clamped = min(max(unitIndex, 0), max(spreads.count - 1, 0))
+            if let firstPage = spreads[clamped].pageIndices.first {
+                unitIndex = firstPage
             }
             viewMode = .single
         } else {
-            spreadIndex = SpreadLayout.spreadIndex(containingPage: pageIndex, in: book)
+            unitIndex = SpreadLayout.spreadIndex(containingPage: unitIndex, in: book)
             viewMode = .spread
         }
     }
 
-    private func bottomBar(book: Book, spreads: [Spread]) -> some View {
+    // MARK: - 底部栏
+
+    private func bottomBar(book: Book) -> some View {
         HStack(spacing: 26) {
             Button { goBackward() } label: {
                 Image(systemName: "chevron.backward").font(.title3)
             }
-            .disabled(!canGoBackward(book: book, spreads: spreads))
+            .disabled(!canGoBackward(book: book))
 
-            Text(positionText(book: book, spreads: spreads))
+            Text(positionText(book: book))
                 .font(.footnote.monospacedDigit())
                 .foregroundStyle(.white.opacity(0.8))
-                .frame(minWidth: 150)
+                .frame(minWidth: 160)
 
             Button { goForward() } label: {
                 Image(systemName: "chevron.forward").font(.title3)
             }
-            .disabled(!canGoForward(book: book, spreads: spreads))
+            .disabled(!canGoForward(book: book))
         }
         .buttonStyle(.plain)
         .foregroundStyle(.white)
         .padding(.vertical, 10)
         .padding(.horizontal, 20)
         .background(Color.black.opacity(0.35), in: Capsule())
-        .padding(.bottom, 14)
+        .padding(.bottom, 10)
     }
 
-    private func positionText(book: Book, spreads: [Spread]) -> String {
+    private func positionText(book: Book) -> String {
         if viewMode == .spread {
-            let clamped = min(max(spreadIndex, 0), max(spreads.count - 1, 0))
-            return "跨页 \(clamped + 1) / \(spreads.count)"
+            let count = SpreadLayout.spreads(for: book).count
+            let clamped = min(max(unitIndex, 0), max(count - 1, 0))
+            return "跨页 \(clamped + 1) / \(count)"
         } else {
-            let clamped = min(max(pageIndex, 0), max(book.pages.count - 1, 0))
+            let clamped = min(max(unitIndex, 0), max(book.pages.count - 1, 0))
             return "第 \(clamped + 1) 页 / \(book.pages.count)"
         }
     }
 
+    // MARK: - 笔工具栏
+
+    private var penToolbar: some View {
+        HStack(spacing: 14) {
+            ForEach(PenKind.allCases, id: \.self) { kind in
+                Button {
+                    penKind = kind
+                } label: {
+                    Image(systemName: kind.systemImage)
+                        .font(.system(size: 17))
+                        .frame(width: 36, height: 36)
+                        .background(penKind == kind
+                                    ? Color.accentColor.opacity(0.30)
+                                    : Color.clear)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+            }
+
+            Divider().frame(height: 22)
+
+            HStack(spacing: 9) {
+                ForEach(PenColor.allCases, id: \.self) { c in
+                    Circle()
+                        .fill(c.color)
+                        .frame(width: 24, height: 24)
+                        .overlay(
+                            Circle().stroke(
+                                Color.primary.opacity(penColorEnum == c ? 0.9 : 0.15),
+                                lineWidth: penColorEnum == c ? 2.5 : 1
+                            )
+                        )
+                        .onTapGesture { penColorEnum = c }
+                }
+            }
+            .opacity(penKind == .eraser ? 0.3 : 1)
+            .allowsHitTesting(penKind != .eraser)
+
+            Divider().frame(height: 22)
+
+            ForEach(PenWidth.allCases, id: \.self) { w in
+                Button {
+                    penWidth = w
+                } label: {
+                    Circle()
+                        .fill(Color.primary.opacity(0.85))
+                        .frame(width: w.dotSize, height: w.dotSize)
+                        .frame(width: 30, height: 30)
+                        .background(penWidth == w
+                                    ? Color.accentColor.opacity(0.18)
+                                    : Color.clear)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+            }
+
+            Divider().frame(height: 22)
+
+            Button { undoTrigger += 1 } label: {
+                Image(systemName: "arrow.uturn.backward")
+            }
+            Button { redoTrigger += 1 } label: {
+                Image(systemName: "arrow.uturn.forward")
+            }
+            Button { clearTrigger += 1 } label: {
+                Image(systemName: "trash")
+            }
+        }
+        .font(.system(size: 16))
+        .foregroundStyle(.white)
+        .padding(.vertical, 9)
+        .padding(.horizontal, 16)
+        .background(Color.black.opacity(0.55), in: Capsule())
+        .padding(.bottom, 8)
+    }
+
+    // MARK: - 工具栏（导航栏）
+
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
+        ToolbarItem(placement: .navigationBarTrailing) {
+            Button {
+                isPenActive.toggle()
+            } label: {
+                Image(systemName: isPenActive ? "pencil.circle.fill" : "pencil.circle")
+                    .font(.title3)
+            }
+        }
+
         ToolbarItem(placement: .navigationBarTrailing) {
             Menu {
                 Button {
@@ -427,6 +649,8 @@ struct BookReaderView: View {
             }
         }
     }
+
+    // MARK: - 导入
 
     private func importFromPhotos(_ items: [PhotosPickerItem]) async {
         var newPages: [Page] = []
@@ -485,11 +709,12 @@ struct BookReaderView: View {
         currentBook.pages.append(contentsOf: newPages)
         library.update(currentBook)
 
+        didAutoAppend = false
+
         if viewMode == .spread {
-            spreadIndex = SpreadLayout.spreadIndex(containingPage: startIndex,
-                                                   in: currentBook)
+            unitIndex = SpreadLayout.spreadIndex(containingPage: startIndex, in: currentBook)
         } else {
-            pageIndex = startIndex
+            unitIndex = startIndex
         }
     }
 }
