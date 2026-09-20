@@ -46,9 +46,13 @@ struct DrawingCanvas: UIViewRepresentable {
     var onZoomChanged: (CGFloat) -> Void = { _ in }
 
     /// 「100%」对应的 zoomScale
+    /// ⚠️ 加了下限 / 上限保护：viewportSize 为 0 或异常时不会算出 0 / NaN / 无穷大，
+    ///    否则 UIScrollView 设 zoomScale 时会直接崩。
     private var fitScale: CGFloat {
         guard canvasSize.height > 0, viewportSize.height > 0 else { return 1 }
-        return viewportSize.height / canvasSize.height
+        let raw = viewportSize.height / canvasSize.height
+        guard raw.isFinite, raw > 0 else { return 1 }
+        return min(max(raw, 0.02), 6)
     }
 
     func makeCoordinator() -> Coordinator {
@@ -70,7 +74,7 @@ struct DrawingCanvas: UIViewRepresentable {
         // 缩放范围：fit = 100%
         scroll.minimumZoomScale = fit
         scroll.maximumZoomScale = fit * 6
-        scroll.zoomScale = fit
+        scroll.setZoomScale(fit, animated: false)
         scroll.bouncesZoom = true
         scroll.showsHorizontalScrollIndicator = false
         scroll.showsVerticalScrollIndicator = false
@@ -195,7 +199,7 @@ struct DrawingCanvas: UIViewRepresentable {
         context.coordinator.spreadIndex = spreadIndex
         context.coordinator.displaySize = displaySize
 
-        // 视口尺寸变化（横竖屏 / 单双页切换）
+        // 视口尺寸变化（横竖屏 / 单双页切换 / 进入编辑模式时内边距变化）
         if scroll.bounds.size != viewportSize {
             scroll.frame = CGRect(origin: .zero, size: viewportSize)
             scroll.bounds = CGRect(origin: .zero, size: viewportSize)
@@ -203,6 +207,7 @@ struct DrawingCanvas: UIViewRepresentable {
             scroll.maximumZoomScale = fit * 6
             scroll.setZoomScale(fit, animated: false)
             applyInitialOffset(scroll, fit: fit, animated: false, in: context.coordinator)
+            context.coordinator.publishZoom(1, force: true)
         }
 
         if canvas.bounds.size != canvasSize {
@@ -217,7 +222,7 @@ struct DrawingCanvas: UIViewRepresentable {
             scroll.setZoomScale(fit, animated: false)
             scroll.contentOffset = CGPoint(x: wantedOffset, y: 0)
             context.coordinator.lastAppliedOffsetX = wantedOffset
-            context.coordinator.onZoomChanged(1)
+            context.coordinator.publishZoom(1, force: true)
         }
 
         let policy: PKCanvasViewDrawingPolicy = pencilOnly ? .pencilOnly : .anyInput
@@ -241,13 +246,15 @@ struct DrawingCanvas: UIViewRepresentable {
         if context.coordinator.lastClearTrigger != clearTrigger {
             context.coordinator.lastClearTrigger = clearTrigger
             canvas.drawing = PKDrawing()
-            onDrawingChanged(PKDrawing())
+            DispatchQueue.main.async {
+                onDrawingChanged(PKDrawing())
+            }
         }
         if context.coordinator.lastZoomResetTrigger != zoomResetTrigger {
             context.coordinator.lastZoomResetTrigger = zoomResetTrigger
             scroll.setZoomScale(fit, animated: false)
             scroll.contentOffset = CGPoint(x: clampedOffset(fit: fit), y: 0)
-            context.coordinator.onZoomChanged(1)
+            context.coordinator.publishZoom(1, force: true)
         }
         if context.coordinator.lastZoomInTrigger != zoomInTrigger {
             context.coordinator.lastZoomInTrigger = zoomInTrigger
@@ -328,6 +335,9 @@ struct DrawingCanvas: UIViewRepresentable {
 
         private var rapidUndoTimer: Timer?
 
+        /// 上一次已经回传给 SwiftUI 的缩放倍率（去重用）
+        private var lastReportedRatio: CGFloat = -1
+
         init(onDrawingChanged: @escaping (PKDrawing) -> Void,
              onDrawingStateChanged: @escaping (Bool) -> Void,
              onPickColor: @escaping (Color) -> Void,
@@ -365,10 +375,36 @@ struct DrawingCanvas: UIViewRepresentable {
             reportZoom(scrollView)
         }
 
+        /// ⚠️ 这是「点编辑闪退」的核心修复点。
+        ///
+        /// scrollView 在 makeUIView / updateUIView 里设置 zoomScale 时，会「同步」
+        /// 回调到 scrollViewDidZoom → reportZoom。此时 SwiftUI 正在执行视图更新事务，
+        /// 如果同步把值写回 @State，就会触发 "Modifying state during view update" 崩溃。
+        ///
+        /// 所以：读取数值 → 做保护 → 排队到下一个 runloop 再回传。
         private func reportZoom(_ scrollView: UIScrollView) {
             let fit = scrollView.minimumZoomScale
-            let ratio = fit > 0 ? scrollView.zoomScale / fit : 1
-            onZoomChanged(ratio)
+            guard fit > 0, fit.isFinite else { return }
+
+            var ratio = scrollView.zoomScale / fit
+            guard ratio.isFinite else { return }
+            ratio = min(max(ratio, 0.02), 12)
+
+            publishZoom(ratio)
+        }
+
+        /// 统一出口：所有缩放倍率都从这里出去，保证在 SwiftUI 更新事务之外送达。
+        /// force = true 用于「吸回 100% / 重置缩放」这类必须强推一次的场景。
+        func publishZoom(_ ratio: CGFloat, force: Bool = false) {
+            guard ratio.isFinite else { return }
+            if !force {
+                guard abs(ratio - lastReportedRatio) > 0.004 else { return }
+            }
+            lastReportedRatio = ratio
+
+            DispatchQueue.main.async { [weak self] in
+                self?.onZoomChanged(ratio)
+            }
         }
 
         /// 以当前视口中心为锚点精确缩放
@@ -377,7 +413,8 @@ struct DrawingCanvas: UIViewRepresentable {
             let target = min(max(scroll.zoomScale * factor,
                                  scroll.minimumZoomScale),
                              scroll.maximumZoomScale)
-            guard abs(target - scroll.zoomScale) > 0.0001 else { return }
+            guard target.isFinite,
+                  abs(target - scroll.zoomScale) > 0.0001 else { return }
             scroll.setZoomScale(target, animated: true)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
                 guard let self, let s = self.scroll else { return }
@@ -405,7 +442,11 @@ struct DrawingCanvas: UIViewRepresentable {
         // MARK: PKCanvasView
 
         func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
-            onDrawingChanged(canvasView.drawing)
+            // ⚠️ 同样异步：这个回调可能在 SwiftUI 视图更新事务中被触发
+            let drawing = canvasView.drawing
+            DispatchQueue.main.async { [weak self] in
+                self?.onDrawingChanged(drawing)
+            }
         }
 
         func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
@@ -464,7 +505,9 @@ struct DrawingCanvas: UIViewRepresentable {
         @objc func handleFourFingerTap() {
             guard let canvas else { return }
             canvas.drawing = PKDrawing()
-            onDrawingChanged(PKDrawing())
+            DispatchQueue.main.async { [weak self] in
+                self?.onDrawingChanged(PKDrawing())
+            }
             UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
         }
 
@@ -492,7 +535,10 @@ struct DrawingCanvas: UIViewRepresentable {
                                                 displaySize: size,
                                                 drawing: canvas.drawing,
                                                 atNormalized: CGPoint(x: nx, y: ny)) {
-                onPickColor(picked)
+                // 异步回传，避免在手势回调里同步写 @State
+                DispatchQueue.main.async { [weak self] in
+                    self?.onPickColor(picked)
+                }
                 UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
             }
         }
