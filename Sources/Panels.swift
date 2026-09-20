@@ -1,63 +1,6 @@
 import SwiftUI
 import PencilKit
 
-// MARK: - 进度条（按百分比跳页）
-
-struct ScrubberView: View {
-    let count: Int
-    let index: Int
-    @Binding var scrubbing: Int?
-    let onCommit: (Int) -> Void
-
-    @State private var dragProgress: Double? = nil
-
-    var body: some View {
-        GeometryReader { geo in
-            let w = max(geo.size.width, 1)
-            let safeCount = max(count, 1)
-            let baseProgress: Double = safeCount <= 1
-                ? 0
-                : Double(min(max(index, 0), safeCount - 1)) / Double(safeCount - 1)
-            let shown = dragProgress ?? baseProgress
-            let knobX = min(max(w * shown - 9, 0), max(w - 18, 0))
-
-            ZStack(alignment: .leading) {
-                Capsule()
-                    .fill(Color.white.opacity(0.20))
-                    .frame(height: 5)
-
-                Capsule()
-                    .fill(Color.white.opacity(0.88))
-                    .frame(width: max(4, w * shown), height: 5)
-
-                Circle()
-                    .fill(Color.white)
-                    .frame(width: 18, height: 18)
-                    .shadow(color: .black.opacity(0.45), radius: 4)
-                    .offset(x: knobX)
-            }
-            .frame(maxHeight: .infinity, alignment: .center)
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { value in
-                        let p = min(max(value.location.x / w, 0), 1)
-                        dragProgress = p
-                        scrubbing = Int((p * Double(safeCount - 1)).rounded())
-                    }
-                    .onEnded { value in
-                        let p = min(max(value.location.x / w, 0), 1)
-                        let target = Int((p * Double(safeCount - 1)).rounded())
-                        dragProgress = nil
-                        scrubbing = nil
-                        onCommit(target)
-                    }
-            )
-        }
-        .frame(height: 26)
-    }
-}
-
 // MARK: - 页面缩略图
 
 struct PageThumbnailView: View {
@@ -98,13 +41,14 @@ struct PageThumbnailView: View {
                 if let inkImage {
                     Image(uiImage: inkImage)
                         .resizable()
+                        .interpolation(.high)
                         .frame(width: width * 2, height: height)
                         .offset(x: isRightPage ? -width : 0)
                 }
             }
             .clipped()
             .background(theme.paperColor)
-            .overlay( Rectangle().stroke(theme.paperBorderColor, lineWidth: 0.5) )
+            .overlay(Rectangle().stroke(theme.paperBorderColor, lineWidth: 0.5))
             .task(id: "\(book.id.uuidString)-\(spreadIndex)") {
                 await loadInk()
             }
@@ -117,7 +61,7 @@ struct PageThumbnailView: View {
             guard let data = try? Data(contentsOf: url),
                   let d = try? PKDrawing(data: data),
                   !d.strokes.isEmpty else { return nil }
-            return d.image(from: CGRect(origin: .zero, size: logical), scale: 1)
+            return d.image(from: CGRect(origin: .zero, size: logical), scale: 1.5)
         }.value
         inkImage = img
     }
@@ -126,53 +70,41 @@ struct PageThumbnailView: View {
 // MARK: - 总页面面板
 
 struct ThumbnailPanelView: View {
-    let book: Book
     let currentPageIndex: Int
     let theme: ReaderTheme
     let onSelect: (Int) -> Void
+    let onChange: (Book) -> Void
 
     @Environment(\.dismiss) private var dismiss
 
+    @State private var working: Book
+    @State private var isSelecting = false
+    @State private var selection: Set<Int> = []
+    @State private var confirmDelete = false
+    @State private var toast: String? = nil
+
     private let columns = [GridItem(.adaptive(minimum: 118, maximum: 180), spacing: 14)]
+
+    init(book: Book,
+         currentPageIndex: Int,
+         theme: ReaderTheme,
+         onSelect: @escaping (Int) -> Void,
+         onChange: @escaping (Book) -> Void) {
+        self.currentPageIndex = currentPageIndex
+        self.theme = theme
+        self.onSelect = onSelect
+        self.onChange = onChange
+        _working = State(initialValue: book)
+    }
 
     var body: some View {
         NavigationStack {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVGrid(columns: columns, spacing: 18) {
-                        ForEach(Array(book.pages.enumerated()), id: \.element.id) { idx, _ in
-                            Button {
-                                onSelect(idx)
-                                dismiss()
-                            } label: {
-                                VStack(spacing: 6) {
-                                    PageThumbnailView(book: book,
-                                                      pageIndex: idx,
-                                                      width: 124,
-                                                      height: 124 * book.pageAspectRatio,
-                                                      theme: theme)
-                                    .clipShape(RoundedRectangle(cornerRadius: 4,
-                                                                style: .continuous))
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 4,
-                                                         style: .continuous)
-                                            .stroke(idx == currentPageIndex
-                                                    ? Color.accentColor
-                                                    : Color.clear,
-                                                    lineWidth: 3)
-                                    )
-                                    .shadow(color: .black.opacity(0.12),
-                                            radius: 3, y: 2)
-
-                                    Text("\(idx + 1)")
-                                        .font(.caption.monospacedDigit())
-                                        .foregroundStyle(idx == currentPageIndex
-                                                         ? Color.accentColor
-                                                         : Color.secondary)
-                                }
-                            }
-                            .buttonStyle(.plain)
-                            .id(idx)
+                        ForEach(Array(working.pages.enumerated()),
+                                id: \.element.id) { idx, _ in
+                            cell(idx)
                         }
                     }
                     .padding(16)
@@ -181,13 +113,247 @@ struct ThumbnailPanelView: View {
                     proxy.scrollTo(currentPageIndex, anchor: .center)
                 }
             }
-            .navigationTitle("总页面 · \(book.pages.count) 页")
+            .navigationTitle("总页面 · \(working.pages.count) 页")
             .navigationBarTitleDisplayMode(.inline)
+            .safeAreaInset(edge: .bottom) {
+                if isSelecting { selectionBar }
+            }
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Button("关闭") { dismiss() }
+                    if isSelecting {
+                        Button("取消") { exitSelection() }
+                    } else {
+                        Button("关闭") { dismiss() }
+                    }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    if isSelecting {
+                        Button(selection.count == working.pages.count
+                               ? "取消全选" : "全选") {
+                            if selection.count == working.pages.count {
+                                selection.removeAll()
+                            } else {
+                                selection = Set(working.pages.indices)
+                            }
+                        }
+                    } else {
+                        Button("选择") { isSelecting = true }
+                    }
                 }
             }
+            .confirmationDialog("删除 \(selection.count) 页？",
+                                isPresented: $confirmDelete,
+                                titleVisibility: .visible) {
+                Button("删除", role: .destructive) { performDelete() }
+                Button("取消", role: .cancel) { }
+            } message: {
+                Text("笔迹是按「跨页位置」保存的。删除页面会改变后续页面与笔迹的对应关系。")
+            }
+            .overlay(alignment: .top) {
+                if let toast {
+                    Text(toast)
+                        .font(.footnote)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(Color.black.opacity(0.78), in: Capsule())
+                        .padding(.top, 8)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
+            }
+        }
+    }
+
+    // MARK: - 单元格
+
+    @ViewBuilder
+    private func cell(_ idx: Int) -> some View {
+        let selected = selection.contains(idx)
+
+        VStack(spacing: 6) {
+            PageThumbnailView(book: working,
+                              pageIndex: idx,
+                              width: 124,
+                              height: 124 * working.pageAspectRatio,
+                              theme: theme)
+                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .stroke(selected
+                                ? Color.accentColor
+                                : (idx == currentPageIndex
+                                   ? Color.accentColor.opacity(0.45)
+                                   : Color.clear),
+                                lineWidth: selected ? 3 : 2)
+                )
+                .overlay(alignment: .topLeading) {
+                    if isSelecting {
+                        Image(systemName: selected
+                              ? "checkmark.circle.fill" : "circle")
+                            .font(.system(size: 20))
+                            .foregroundStyle(selected ? Color.accentColor : Color.white)
+                            .shadow(color: .black.opacity(0.5), radius: 2)
+                            .padding(5)
+                    }
+                }
+                .shadow(color: .black.opacity(0.12), radius: 3, y: 2)
+
+            Text("\(idx + 1)")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(idx == currentPageIndex
+                                 ? Color.accentColor : Color.secondary)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if isSelecting {
+                toggleSelection(idx)
+            } else {
+                onSelect(idx)
+                dismiss()
+            }
+        }
+        .contextMenu {
+            if !isSelecting {
+                Button {
+                    insertBlank(after: idx)
+                } label: {
+                    Label("在此页后插入空白页", systemImage: "plus.rectangle")
+                }
+                Button {
+                    addToOutline([idx])
+                } label: {
+                    Label("添加到大纲", systemImage: "list.bullet.indent")
+                }
+                Button {
+                    isSelecting = true
+                    selection = [idx]
+                } label: {
+                    Label("开始选择", systemImage: "checkmark.circle")
+                }
+                Divider()
+                Button(role: .destructive) {
+                    selection = [idx]
+                    confirmDelete = true
+                } label: {
+                    Label("删除此页", systemImage: "trash")
+                }
+            }
+        }
+        .id(idx)
+    }
+
+    // MARK: - 底部批量操作栏
+
+    private var selectionBar: some View {
+        HStack(spacing: 14) {
+            Text("已选 \(selection.count) 页")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
+            Spacer()
+
+            Button {
+                addToOutline(Array(selection))
+                exitSelection()
+            } label: {
+                Label("加入大纲", systemImage: "list.bullet.indent")
+            }
+            .disabled(selection.isEmpty)
+
+            Button(role: .destructive) {
+                confirmDelete = true
+            } label: {
+                Label("删除", systemImage: "trash")
+            }
+            .disabled(selection.isEmpty)
+        }
+        .buttonStyle(.bordered)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 10)
+        .background(.bar)
+    }
+
+    // MARK: - 操作
+
+    private func toggleSelection(_ idx: Int) {
+        if selection.contains(idx) {
+            selection.remove(idx)
+        } else {
+            selection.insert(idx)
+        }
+    }
+
+    private func exitSelection() {
+        isSelecting = false
+        selection.removeAll()
+    }
+
+    private func insertBlank(after idx: Int) {
+        guard working.pages.indices.contains(idx) else { return }
+        var updated = working
+        updated.pages.insert(Page.blank(), at: idx + 1)
+        working = updated
+        onChange(updated)
+        showToast("已插入空白页")
+    }
+
+    private func addToOutline(_ indices: [Int]) {
+        guard !indices.isEmpty else { return }
+        var updated = working
+        for idx in indices.sorted() {
+            var item = OutlineItem()
+            item.title = "第 \(idx + 1) 页"
+            item.pageIndex = idx
+            item.level = 0
+            updated.outline.append(item)
+        }
+        working = updated
+        onChange(updated)
+        showToast("已加入大纲 \(indices.count) 条")
+    }
+
+    private func performDelete() {
+        let indices = selection.sorted()
+        guard !indices.isEmpty else { return }
+
+        var updated = working
+
+        // 1. 删掉这些页独占的图片文件
+        for idx in indices where updated.pages.indices.contains(idx) {
+            if let name = updated.pages[idx].imageFileName {
+                FileStorage.deleteImage(named: name)
+            }
+        }
+
+        // 2. 从线性列表里移除
+        updated.pages = updated.pages.enumerated()
+            .filter { !selection.contains($0.offset) }
+            .map { $0.element }
+
+        // 3. 修正大纲里指向已删除区域的条目
+        updated.outline = updated.outline.map { item in
+            var it = item
+            let removedBefore = indices.filter { $0 < item.pageIndex }.count
+            it.pageIndex = min(max(item.pageIndex - removedBefore, 0),
+                               max(updated.pages.count - 1, 0))
+            return it
+        }
+
+        // 4. 不能一本书一页都没有
+        if updated.pages.isEmpty {
+            updated.pages = [Page.blank()]
+        }
+
+        working = updated
+        onChange(updated)
+        exitSelection()
+        showToast("已删除 \(indices.count) 页")
+    }
+
+    private func showToast(_ text: String) {
+        withAnimation { toast = text }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) {
+            withAnimation { toast = nil }
         }
     }
 }
