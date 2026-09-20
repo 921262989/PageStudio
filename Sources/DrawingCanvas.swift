@@ -5,10 +5,14 @@ import UIKit
 struct DrawingCanvas: UIViewRepresentable {
 
     // 几何
-    let canvasSize: CGSize              // 画布内容尺寸（逻辑跨页，固定）
-    var viewportSize: CGSize? = nil     // 可见窗口尺寸。nil = 与画布同大
-    var initialOffsetX: CGFloat = 0     // 初始横向偏移（单页模式用）
-    let displaySize: CGSize             // 屏幕上占的点尺寸（吸色用）
+    /// 画布内容尺寸（逻辑跨页，固定）
+    let canvasSize: CGSize
+    /// 屏幕上实际占的尺寸（点）。UIScrollView 的 frame 就是它。
+    let viewportSize: CGSize
+    /// 初始横向偏移，单位是「逻辑坐标」
+    var initialOffsetX: CGFloat = 0
+    /// 屏幕上跨页占的点尺寸（吸色用）
+    let displaySize: CGSize
 
     // 上下文
     let book: Book
@@ -41,9 +45,10 @@ struct DrawingCanvas: UIViewRepresentable {
     let onPickColor: (Color) -> Void
     var onZoomChanged: (CGFloat) -> Void = { _ in }
 
-    private var effectiveViewport: CGSize {
-        let v = viewportSize ?? canvasSize
-        return CGSize(width: max(v.width, 1), height: max(v.height, 1))
+    /// 「100%」对应的 zoomScale
+    private var fitScale: CGFloat {
+        guard canvasSize.height > 0, viewportSize.height > 0 else { return 1 }
+        return viewportSize.height / canvasSize.height
     }
 
     func makeCoordinator() -> Coordinator {
@@ -54,24 +59,28 @@ struct DrawingCanvas: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> UIScrollView {
-        let viewport = effectiveViewport
+        let fit = fitScale
 
         let scroll = UIScrollView()
-        scroll.frame = CGRect(origin: .zero, size: viewport)
+        scroll.frame = CGRect(origin: .zero, size: viewportSize)
         scroll.backgroundColor = .clear
         scroll.isOpaque = false
         scroll.contentInsetAdjustmentBehavior = .never
-        scroll.minimumZoomScale = 1
-        scroll.maximumZoomScale = 6
+
+        // 缩放范围：fit = 100%
+        scroll.minimumZoomScale = fit
+        scroll.maximumZoomScale = fit * 6
+        scroll.zoomScale = fit
         scroll.bouncesZoom = true
         scroll.showsHorizontalScrollIndicator = false
         scroll.showsVerticalScrollIndicator = false
         scroll.delegate = context.coordinator
+
         // 单指留给画笔，双指才平移/缩放
         scroll.panGestureRecognizer.minimumNumberOfTouches = 2
+        scroll.panGestureRecognizer.maximumNumberOfTouches = 2
         scroll.delaysContentTouches = false
         scroll.canCancelContentTouches = false
-        scroll.contentSize = canvasSize
 
         let canvas = PKCanvasView()
         canvas.frame = CGRect(origin: .zero, size: canvasSize)
@@ -82,26 +91,30 @@ struct DrawingCanvas: UIViewRepresentable {
         canvas.tool = tool
         canvas.drawingPolicy = pencilOnly ? .pencilOnly : .anyInput
 
+        // 画布自身的滚动/缩放全部关掉，避免和外层抢手势
         canvas.isScrollEnabled = false
         canvas.minimumZoomScale = 1
         canvas.maximumZoomScale = 1
         canvas.alwaysBounceVertical = false
         canvas.alwaysBounceHorizontal = false
+        canvas.pinchGestureRecognizer?.isEnabled = false
 
         canvas.delegate = context.coordinator
 
         scroll.addSubview(canvas)
-
-        // 初始偏移（单页模式看右半页）
-        let maxOffset = max(canvasSize.width - viewport.width, 0)
-        let startX = min(max(initialOffsetX, 0), maxOffset)
-        scroll.contentOffset = CGPoint(x: startX, y: 0)
+        scroll.contentSize = canvasSize
 
         context.coordinator.scroll = scroll
         context.coordinator.canvas = canvas
         context.coordinator.lastToolSignature = toolSignature
-        context.coordinator.lastInitialOffsetX = startX
-        context.coordinator.initialOffsetX = startX
+
+        applyInitialOffset(scroll, fit: fit, animated: false, in: context.coordinator)
+
+        // 让外层缩放手势优先，不被画布内部手势拖累
+        if let pinch = scroll.pinchGestureRecognizer {
+            pinch.delegate = context.coordinator
+        }
+        scroll.panGestureRecognizer.delegate = context.coordinator
 
         // MARK: 双指轻点 → 撤销
         let twoTap = UITapGestureRecognizer(
@@ -122,7 +135,7 @@ struct DrawingCanvas: UIViewRepresentable {
         )
         rapidUndo.numberOfTouchesRequired = 2
         rapidUndo.minimumPressDuration = 0.45
-        rapidUndo.allowableMovement = 24
+        rapidUndo.allowableMovement = 60
         rapidUndo.cancelsTouchesInView = false
         rapidUndo.delegate = context.coordinator
         scroll.addGestureRecognizer(rapidUndo)
@@ -172,7 +185,7 @@ struct DrawingCanvas: UIViewRepresentable {
     func updateUIView(_ scroll: UIScrollView, context: Context) {
         guard let canvas = context.coordinator.canvas else { return }
 
-        let viewport = effectiveViewport
+        let fit = fitScale
 
         context.coordinator.onDrawingChanged = onDrawingChanged
         context.coordinator.onDrawingStateChanged = onDrawingStateChanged
@@ -182,26 +195,29 @@ struct DrawingCanvas: UIViewRepresentable {
         context.coordinator.spreadIndex = spreadIndex
         context.coordinator.displaySize = displaySize
 
-        // 视口尺寸变化（横竖屏切换）
-        if scroll.bounds.size != viewport {
-            scroll.frame = CGRect(origin: .zero, size: viewport)
-            scroll.bounds = CGRect(origin: .zero, size: viewport)
+        // 视口尺寸变化（横竖屏 / 单双页切换）
+        if scroll.bounds.size != viewportSize {
+            scroll.frame = CGRect(origin: .zero, size: viewportSize)
+            scroll.bounds = CGRect(origin: .zero, size: viewportSize)
+            scroll.minimumZoomScale = fit
+            scroll.maximumZoomScale = fit * 6
+            scroll.setZoomScale(fit, animated: false)
+            applyInitialOffset(scroll, fit: fit, animated: false, in: context.coordinator)
         }
 
         if canvas.bounds.size != canvasSize {
             canvas.frame = CGRect(origin: .zero, size: canvasSize)
             canvas.bounds = CGRect(origin: .zero, size: canvasSize)
             scroll.contentSize = canvasSize
-            scroll.setZoomScale(1, animated: false)
         }
 
         // 初始偏移变化（单页模式左右页切换）
-        let maxOffset = max(canvasSize.width - viewport.width, 0)
-        let wantedX = min(max(initialOffsetX, 0), maxOffset)
-        if abs(context.coordinator.lastInitialOffsetX - wantedX) > 0.5 {
-            context.coordinator.lastInitialOffsetX = wantedX
-            scroll.setZoomScale(1, animated: false)
-            scroll.contentOffset = CGPoint(x: wantedX, y: 0)
+        let wantedOffset = clampedOffset(fit: scroll.zoomScale)
+        if abs(context.coordinator.lastAppliedOffsetX - wantedOffset) > 0.5 {
+            scroll.setZoomScale(fit, animated: false)
+            scroll.contentOffset = CGPoint(x: wantedOffset, y: 0)
+            context.coordinator.lastAppliedOffsetX = wantedOffset
+            context.coordinator.onZoomChanged(1)
         }
 
         let policy: PKCanvasViewDrawingPolicy = pencilOnly ? .pencilOnly : .anyInput
@@ -209,7 +225,6 @@ struct DrawingCanvas: UIViewRepresentable {
             canvas.drawingPolicy = policy
         }
 
-        // ⚠️ 只在签名真的变了才重设工具
         if context.coordinator.lastToolSignature != toolSignature {
             context.coordinator.lastToolSignature = toolSignature
             canvas.tool = tool
@@ -230,19 +245,19 @@ struct DrawingCanvas: UIViewRepresentable {
         }
         if context.coordinator.lastZoomResetTrigger != zoomResetTrigger {
             context.coordinator.lastZoomResetTrigger = zoomResetTrigger
-            scroll.setZoomScale(1, animated: true)
-            scroll.setContentOffset(CGPoint(x: wantedX, y: 0), animated: true)
+            scroll.setZoomScale(fit, animated: false)
+            scroll.contentOffset = CGPoint(x: clampedOffset(fit: fit), y: 0)
+            context.coordinator.onZoomChanged(1)
         }
         if context.coordinator.lastZoomInTrigger != zoomInTrigger {
             context.coordinator.lastZoomInTrigger = zoomInTrigger
-            context.coordinator.zoom(by: 1.25)
+            context.coordinator.zoom(by: 1.3)
         }
         if context.coordinator.lastZoomOutTrigger != zoomOutTrigger {
             context.coordinator.lastZoomOutTrigger = zoomOutTrigger
-            context.coordinator.zoom(by: 0.8)
+            context.coordinator.zoom(by: 1 / 1.3)
         }
 
-        // 手势开关
         let on = gesturesEnabled
         context.coordinator.twoFingerTap?.isEnabled = on && twoFingerUndo
         context.coordinator.rapidUndoGesture?.isEnabled = on && twoFingerLongPressUndo
@@ -250,6 +265,30 @@ struct DrawingCanvas: UIViewRepresentable {
         context.coordinator.fourFingerTap?.isEnabled = on && fourFingerClear
         context.coordinator.eyedropperGesture?.isEnabled =
             on && longPressEyedropper && pencilOnly
+    }
+
+    // MARK: - 偏移换算
+
+    /// initialOffsetX 是逻辑坐标；这里换算成当前 zoomScale 下的 contentOffset.x
+    private func clampedOffset(fit: CGFloat) -> CGFloat {
+        let z = max(fit, 0.0001)
+        let wanted = initialOffsetX * z
+        let maxOffset = max(canvasSize.width * z - viewportSize.width, 0)
+        return min(max(wanted, 0), maxOffset)
+    }
+
+    private func applyInitialOffset(_ scroll: UIScrollView,
+                                    fit: CGFloat,
+                                    animated: Bool,
+                                    in coordinator: Coordinator) {
+        let x = clampedOffset(fit: fit)
+        if animated {
+            scroll.setContentOffset(CGPoint(x: x, y: 0), animated: true)
+        } else {
+            scroll.contentOffset = CGPoint(x: x, y: 0)
+        }
+        coordinator.lastAppliedOffsetX = x
+        coordinator.initialOffsetX = initialOffsetX
     }
 
     // MARK: - Coordinator
@@ -279,7 +318,7 @@ struct DrawingCanvas: UIViewRepresentable {
         var lastZoomResetTrigger: Int = 0
         var lastZoomInTrigger: Int = 0
         var lastZoomOutTrigger: Int = 0
-        var lastInitialOffsetX: CGFloat = -1
+        var lastAppliedOffsetX: CGFloat = -1
 
         weak var twoFingerTap: UITapGestureRecognizer?
         weak var rapidUndoGesture: UILongPressGestureRecognizer?
@@ -309,36 +348,58 @@ struct DrawingCanvas: UIViewRepresentable {
             canvas
         }
 
-        /// 以视口中心为锚点精确缩放
-        func zoom(by factor: CGFloat) {
-            guard let scroll else { return }
-            let target = min(max(scroll.zoomScale * factor, scroll.minimumZoomScale),
-                             scroll.maximumZoomScale)
-            guard abs(target - scroll.zoomScale) > 0.001 else { return }
-            scroll.setZoomScale(target, animated: true)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) { [weak self] in
-                guard let self, let scroll = self.scroll else { return }
-                self.onZoomChanged(scroll.zoomScale)
-            }
-        }
-
         func scrollViewDidZoom(_ scrollView: UIScrollView) {
-            onZoomChanged(scrollView.zoomScale)
+            reportZoom(scrollView)
         }
 
         func scrollViewDidEndZooming(_ scrollView: UIScrollView,
                                      with view: UIView?,
                                      atScale scale: CGFloat) {
-            // 接近 1× 就吸附回去，避免留下 1.03× 这种尴尬倍率
-            if abs(scale - 1) < 0.06, scale != 1 {
-                scrollView.setZoomScale(1, animated: true)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) { [weak self] in
-                    guard let self, let scroll = self.scroll else { return }
-                    self.onZoomChanged(scroll.zoomScale)
-                }
-            } else {
-                onZoomChanged(scrollView.zoomScale)
+            let fit = scrollView.minimumZoomScale
+            let ratio = fit > 0 ? scale / fit : 1
+
+            // 接近 100% 就吸回去
+            if abs(ratio - 1) < 0.06, ratio != 1 {
+                scrollView.setZoomScale(fit, animated: true)
             }
+            reportZoom(scrollView)
+        }
+
+        private func reportZoom(_ scrollView: UIScrollView) {
+            let fit = scrollView.minimumZoomScale
+            let ratio = fit > 0 ? scrollView.zoomScale / fit : 1
+            onZoomChanged(ratio)
+        }
+
+        /// 以当前视口中心为锚点精确缩放
+        func zoom(by factor: CGFloat) {
+            guard let scroll else { return }
+            let target = min(max(scroll.zoomScale * factor,
+                                 scroll.minimumZoomScale),
+                             scroll.maximumZoomScale)
+            guard abs(target - scroll.zoomScale) > 0.0001 else { return }
+            scroll.setZoomScale(target, animated: true)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                guard let self, let s = self.scroll else { return }
+                self.reportZoom(s)
+            }
+        }
+
+        // MARK: 手势优先级
+
+        func gestureRecognizer(_ g: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            true
+        }
+
+        func gestureRecognizer(_ g: UIGestureRecognizer,
+                               shouldRequireFailureOf other: UIGestureRecognizer) -> Bool {
+            false
+        }
+
+        func gestureRecognizer(_ g: UIGestureRecognizer,
+                               shouldBeRequiredToFailBy other: UIGestureRecognizer) -> Bool {
+            false
         }
 
         // MARK: PKCanvasView
@@ -355,12 +416,7 @@ struct DrawingCanvas: UIViewRepresentable {
             onDrawingStateChanged(false)
         }
 
-        // MARK: 手势
-
-        func gestureRecognizer(_ g: UIGestureRecognizer,
-                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
-            true
-        }
+        // MARK: 手势动作
 
         @objc func handleTwoFingerTap() {
             guard let canvas else { return }
@@ -414,10 +470,8 @@ struct DrawingCanvas: UIViewRepresentable {
 
         @objc func handleEyedropper(_ g: UILongPressGestureRecognizer) {
             guard g.state == .began else { return }
-            guard let canvas, let book, let scroll else { return }
+            guard let canvas, let book else { return }
 
-            // location 在画布坐标系里；画布原点可能被 contentOffset 偏移，
-            // 但 location(in:) 已自动处理过，所以直接用。
             let local = g.location(in: canvas)
             let logical = DrawingGeometry.spreadSize(ratio: book.pageAspectRatio)
             guard logical.width > 0, logical.height > 0 else { return }
@@ -441,7 +495,6 @@ struct DrawingCanvas: UIViewRepresentable {
                 onPickColor(picked)
                 UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
             }
-            _ = scroll
         }
     }
 }
