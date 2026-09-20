@@ -18,10 +18,9 @@ struct LayerMeta: Identifiable, Codable, Hashable {
 
 final class LayerStore: ObservableObject {
 
-    /// 元数据变更时才自增。笔迹内容变化**不**触发，避免影响绘制性能。
+    /// 元数据变更时自增。笔迹内容变化不触发。
     @Published private(set) var version: Int = 0
 
-    /// key = "bookId_uuid_spreadIndex"
     private var registry: [String: [LayerMeta]] = [:]
     private var drawings: [String: [UUID: PKDrawing]] = [:]
     private var pendingSaves: [String: DispatchWorkItem] = [:]
@@ -32,8 +31,6 @@ final class LayerStore: ObservableObject {
 
     // MARK: - 读取
 
-    /// 某一跨页的所有图层（从下到上）。
-    /// 首次访问会从磁盘加载；旧数据会自动迁移成「图层 1」。
     func layers(bookId: UUID, spreadIndex: Int) -> [LayerMeta] {
         let k = key(bookId, spreadIndex)
         if let cached = registry[k] { return cached }
@@ -62,7 +59,6 @@ final class LayerStore: ObservableObject {
         return drawing
     }
 
-    /// 是否所有图层都是空的
     func isEmpty(bookId: UUID, spreadIndex: Int) -> Bool {
         for meta in layers(bookId: bookId, spreadIndex: spreadIndex) {
             let d = drawing(bookId: bookId, spreadIndex: spreadIndex, layerID: meta.id)
@@ -82,6 +78,8 @@ final class LayerStore: ObservableObject {
         dict[layerID] = drawing
         drawings[k] = dict
 
+        saveKeySafetyNet(bookId: bookId, spreadIndex: spreadIndex)
+
         let saveKey = "\(k)_\(layerID.uuidString)"
         pendingSaves[saveKey]?.cancel()
 
@@ -97,11 +95,17 @@ final class LayerStore: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
     }
 
+    /// 确保持久化 meta，防止首次绘制后重启导致 UUID 变化、笔迹成为孤儿
+    private func saveKeySafetyNet(bookId: UUID, spreadIndex: Int) {
+        let k = key(bookId, spreadIndex)
+        guard let list = registry[k] else { return }
+        writeMeta(list, bookId: bookId, spreadIndex: spreadIndex)
+    }
+
     func clearLayer(bookId: UUID, spreadIndex: Int, layerID: UUID) {
         setDrawing(PKDrawing(), bookId: bookId,
                    spreadIndex: spreadIndex, layerID: layerID)
 
-        // 立刻落盘
         let url = layerFileURL(bookId: bookId, spreadIndex: spreadIndex, layerID: layerID)
         try? FileManager.default.removeItem(at: url)
     }
@@ -155,6 +159,7 @@ final class LayerStore: ObservableObject {
     func setVisibility(_ visible: Bool, layerID: UUID, bookId: UUID, spreadIndex: Int) {
         var list = layers(bookId: bookId, spreadIndex: spreadIndex)
         guard let i = list.firstIndex(where: { $0.id == layerID }) else { return }
+        guard list[i].isVisible != visible else { return }
         list[i].isVisible = visible
         commit(list, bookId: bookId, spreadIndex: spreadIndex)
     }
@@ -162,7 +167,8 @@ final class LayerStore: ObservableObject {
     func setOpacity(_ value: Double, layerID: UUID, bookId: UUID, spreadIndex: Int) {
         var list = layers(bookId: bookId, spreadIndex: spreadIndex)
         guard let i = list.firstIndex(where: { $0.id == layerID }) else { return }
-        list[i].opacity = min(max(value, 0), 1)
+        let clamped = min(max(value, 0), 1)
+        list[i].opacity = clamped
         commit(list, bookId: bookId, spreadIndex: spreadIndex)
     }
 
@@ -213,7 +219,9 @@ final class LayerStore: ObservableObject {
         try? data.write(to: url, options: .atomic)
     }
 
-    /// 读取图层元数据，并兼容旧版单层笔迹
+    /// 读取图层元数据，并兼容旧版单层笔迹。
+    /// ⚠️ 没有数据时也会**立刻写一份 meta.json**，否则 UUID 每次重启都会变，
+    ///    之前画在这个 UUID 下的笔迹就成了找不到的孤儿文件。
     private func loadMeta(bookId: UUID, spreadIndex: Int) -> [LayerMeta] {
         let url = metaURL(bookId: bookId, spreadIndex: spreadIndex)
 
@@ -223,25 +231,24 @@ final class LayerStore: ObservableObject {
             return decoded
         }
 
-        // 旧数据：只有一个 <spreadIndex>.drawing
         var meta = LayerMeta()
         meta.name = "图层 1"
 
+        // 旧数据：只有一个 <spreadIndex>.drawing
         let legacyURL = FileStorage.drawingURL(bookId: bookId,
                                                spreadIndex: spreadIndex)
         if FileManager.default.fileExists(atPath: legacyURL.path),
            let data = try? Data(contentsOf: legacyURL),
            let legacy = try? PKDrawing(data: data),
            !legacy.strokes.isEmpty {
-            // 把旧笔迹搬进新图层的文件里
             let dest = layerFileURL(bookId: bookId,
                                     spreadIndex: spreadIndex,
                                     layerID: meta.id)
             try? data.write(to: dest, options: .atomic)
-            writeMeta([meta], bookId: bookId, spreadIndex: spreadIndex)
-            return [meta]
         }
 
+        // 无论哪种情况都落盘
+        writeMeta([meta], bookId: bookId, spreadIndex: spreadIndex)
         return [meta]
     }
 }
