@@ -38,8 +38,7 @@ struct DrawingCanvas: UIViewRepresentable {
     let fourFingerClear: Bool
     let longPressEyedropper: Bool
 
-    // 翻页（手指滑动 / 点边缘）—— 由画布内部接管，
-    // 这样它和外层的双指缩放/平移共用同一条触摸路径，不会互相挡。
+    // 翻页（手指滑动 / 点边缘）
     var pagePanEnabled: Bool = false
     var pageTapEnabled: Bool = false
     var onPagePanChanged: (CGFloat) -> Void = { _ in }
@@ -52,15 +51,13 @@ struct DrawingCanvas: UIViewRepresentable {
     let onPickColor: (Color) -> Void
     var onZoomChanged: (CGFloat) -> Void = { _ in }
 
-    /// ⚠️ 所有自定义手势只接受「手指」触摸，刻意排除 Apple Pencil。
-    ///
-    /// UIGestureRecognizer 默认连 Pencil 的触摸一起收。写字时
-    /// 「笔尖 + 搭在屏上的小拇指」就是两个触摸点，会被当成双指手势，
-    /// 画布于是开始平移 / 缩放。钉死为 finger 之后：
-    /// 笔只画画，手势只认手指。
+    /// ⚠️ 所有手势（包括系统自带的）都只接受「手指」触摸，Apple Pencil 一律排除。
     static let fingerOnly: [NSNumber] = [
         NSNumber(value: UITouch.TouchType.direct.rawValue)
     ]
+
+    /// 手掌 / 小拇指侧面这类「大面积接触」的半径阈值（点）。
+    static let maxFingerRadius: CGFloat = 24
 
     private var fitScale: CGFloat {
         guard canvasSize.height > 0, viewportSize.height > 0 else { return 1 }
@@ -84,20 +81,28 @@ struct DrawingCanvas: UIViewRepresentable {
         scroll.backgroundColor = .clear
         scroll.isOpaque = false
         scroll.contentInsetAdjustmentBehavior = .never
+
+        // ⚠️⚠️ 这两行是「单指 / 笔尖把画布拖走」的根治：
+        //   · isScrollEnabled = false → UIScrollView 自己的滚动彻底关掉
+        //   · 光设 panGestureRecognizer.isEnabled 不够，
+        //     系统会在布局变化时把它重新激活，所以还要关 isScrollEnabled
+        scroll.isScrollEnabled = false
         scroll.bounces = false
         scroll.bouncesZoom = false
         scroll.showsHorizontalScrollIndicator = false
         scroll.showsVerticalScrollIndicator = false
         scroll.delegate = context.coordinator
+
+        // 系统手势就算被系统重新启用，也让它们碰不到 Apple Pencil
+        scroll.panGestureRecognizer.isEnabled = false
+        scroll.panGestureRecognizer.allowedTouchTypes = Self.fingerOnly
+        scroll.pinchGestureRecognizer?.isEnabled = false
+        scroll.pinchGestureRecognizer?.allowedTouchTypes = Self.fingerOnly
+
         scroll.minimumZoomScale = fit
         scroll.maximumZoomScale = fit * 6
         scroll.setZoomScale(fit, animated: false)
 
-        // 系统自带的 pinch / pan 关掉（给它们设 delegate 会崩，不设又抢不过画布）
-        scroll.pinchGestureRecognizer?.isEnabled = false
-        scroll.panGestureRecognizer.isEnabled = false
-
-        // 缩放容器：纸张和笔迹都在里面，才能一起变大
         let container = UIView(frame: CGRect(origin: .zero, size: canvasSize))
         container.backgroundColor = .clear
         container.clipsToBounds = true
@@ -121,15 +126,19 @@ struct DrawingCanvas: UIViewRepresentable {
         canvas.drawing = initialDrawing
         canvas.tool = tool
         canvas.drawingPolicy = pencilOnly ? .pencilOnly : .anyInput
+
+        // 画布自己是 UIScrollView 子类，它自带的滚动 / 缩放也全关掉
         canvas.isScrollEnabled = false
         canvas.minimumZoomScale = 1
         canvas.maximumZoomScale = 1
         canvas.alwaysBounceVertical = false
         canvas.alwaysBounceHorizontal = false
-        canvas.pinchGestureRecognizer?.isEnabled = false
         canvas.panGestureRecognizer.isEnabled = false
-        canvas.delegate = context.coordinator
+        canvas.panGestureRecognizer.allowedTouchTypes = Self.fingerOnly
+        canvas.pinchGestureRecognizer?.isEnabled = false
+        canvas.pinchGestureRecognizer?.allowedTouchTypes = Self.fingerOnly
 
+        canvas.delegate = context.coordinator
         canvas.drawingGestureRecognizer.delegate = context.coordinator
 
         container.addSubview(canvas)
@@ -140,13 +149,14 @@ struct DrawingCanvas: UIViewRepresentable {
         context.coordinator.scroll = scroll
         context.coordinator.canvas = canvas
         context.coordinator.container = container
+        context.coordinator.pencilOnly = pencilOnly
         context.coordinator.lastToolSignature = toolSignature
         context.coordinator.initialOffsetX = initialOffsetX
         context.coordinator.lastInitialOffsetX = initialOffsetX
 
         applyInitialOffset(scroll, fit: fit, animated: false, in: context.coordinator)
 
-        // MARK: 双指捏合 → 缩放（只认手指）
+        // MARK: 双指捏合 → 缩放
         let pinch = UIPinchGestureRecognizer(
             target: context.coordinator,
             action: #selector(Coordinator.handlePinch(_:))
@@ -158,7 +168,7 @@ struct DrawingCanvas: UIViewRepresentable {
         scroll.addGestureRecognizer(pinch)
         context.coordinator.customPinch = pinch
 
-        // MARK: 双指拖动 → 平移（只认手指）
+        // MARK: 双指拖动 → 平移
         let twoPan = UIPanGestureRecognizer(
             target: context.coordinator,
             action: #selector(Coordinator.handleTwoFingerPan(_:))
@@ -172,7 +182,7 @@ struct DrawingCanvas: UIViewRepresentable {
         scroll.addGestureRecognizer(twoPan)
         context.coordinator.twoFingerPan = twoPan
 
-        // MARK: 单指拖动 → 翻页（只认手指；最多 1 个触点，和上面的双指互不干扰）
+        // MARK: 单指拖动 → 翻页
         let pagePan = UIPanGestureRecognizer(
             target: context.coordinator,
             action: #selector(Coordinator.handlePagePan(_:))
@@ -186,7 +196,7 @@ struct DrawingCanvas: UIViewRepresentable {
         scroll.addGestureRecognizer(pagePan)
         context.coordinator.pagePan = pagePan
 
-        // MARK: 单指点击 → 边缘翻页（只认手指）
+        // MARK: 单指点击 → 边缘翻页
         let pageTap = UITapGestureRecognizer(
             target: context.coordinator,
             action: #selector(Coordinator.handlePageTap(_:))
@@ -254,7 +264,7 @@ struct DrawingCanvas: UIViewRepresentable {
         scroll.addGestureRecognizer(fourTap)
         context.coordinator.fourFingerTap = fourTap
 
-        // MARK: 单指长按 → 吸色（只认手指）
+        // MARK: 单指长按 → 吸色
         let eyedropper = UILongPressGestureRecognizer(
             target: context.coordinator,
             action: #selector(Coordinator.handleEyedropper(_:))
@@ -276,6 +286,14 @@ struct DrawingCanvas: UIViewRepresentable {
 
         let fit = fitScale
 
+        // 系统手势可能被系统重新激活 —— 每次都把它们按住
+        scroll.isScrollEnabled = false
+        scroll.panGestureRecognizer.isEnabled = false
+        scroll.pinchGestureRecognizer?.isEnabled = false
+        canvas.isScrollEnabled = false
+        canvas.panGestureRecognizer.isEnabled = false
+        canvas.pinchGestureRecognizer?.isEnabled = false
+
         context.coordinator.onDrawingChanged = onDrawingChanged
         context.coordinator.onDrawingStateChanged = onDrawingStateChanged
         context.coordinator.onPickColor = onPickColor
@@ -283,9 +301,12 @@ struct DrawingCanvas: UIViewRepresentable {
         context.coordinator.book = book
         context.coordinator.spreadIndex = spreadIndex
         context.coordinator.displaySize = displaySize
+        context.coordinator.pencilOnly = pencilOnly
         context.coordinator.onPagePanChanged = onPagePanChanged
         context.coordinator.onPagePanEnded = onPagePanEnded
         context.coordinator.onPageTap = onPageTap
+        context.coordinator.pagePanWanted = pagePanEnabled
+        context.coordinator.pageTapWanted = pageTapEnabled
 
         if let paper = context.coordinator.paperView {
             if paper.image !== paperImage {
@@ -384,13 +405,10 @@ struct DrawingCanvas: UIViewRepresentable {
         context.coordinator.eyedropperGesture?.isEnabled =
             on && longPressEyedropper && pencilOnly
 
-        // 双指缩放 / 平移：始终开启。Apple Pencil 已被 allowedTouchTypes 排除。
         context.coordinator.customPinch?.isEnabled = true
         context.coordinator.twoFingerPan?.isEnabled = true
 
-        // 手指翻页：由 ReaderView 按模式决定开不开
-        context.coordinator.pagePan?.isEnabled = pagePanEnabled
-        context.coordinator.pageTap?.isEnabled = pageTapEnabled
+        context.coordinator.syncPageGestures()
     }
 
     // MARK: - 偏移换算
@@ -441,6 +459,12 @@ struct DrawingCanvas: UIViewRepresentable {
         var spreadIndex: Int = 0
         var displaySize: CGSize = .zero
         var initialOffsetX: CGFloat = 0
+        var pencilOnly: Bool = false
+
+        private(set) var isPencilDrawing: Bool = false
+
+        var pagePanWanted: Bool = false
+        var pageTapWanted: Bool = false
 
         var lastToolSignature: String = ""
         var lastUndoTrigger: Int = 0
@@ -466,6 +490,7 @@ struct DrawingCanvas: UIViewRepresentable {
         private var pinchStartScale: CGFloat = 1
         private var panStartOffset: CGPoint = .zero
         private var drawingSuspended = false
+        private var resumeWorkItem: DispatchWorkItem?
 
         private var lastReportedRatio: CGFloat = -1
 
@@ -481,6 +506,31 @@ struct DrawingCanvas: UIViewRepresentable {
 
         deinit {
             rapidUndoTimer?.invalidate()
+            resumeWorkItem?.cancel()
+        }
+
+        func syncPageGestures() {
+            let blocked = pencilOnly && isPencilDrawing
+            pagePan?.isEnabled = pagePanWanted && !blocked
+            pageTap?.isEnabled = pageTapWanted && !blocked
+        }
+
+        // MARK: 触摸过滤
+
+        func gestureRecognizer(_ g: UIGestureRecognizer,
+                               shouldReceive touch: UITouch) -> Bool {
+            // 画布自己的绘制手势：笔、手指一律放行，否则画不了字
+            if let canvas, g === canvas.drawingGestureRecognizer {
+                return true
+            }
+
+            // 其余都是我们自己的手势：只认手指，不要笔
+            if touch.type != .direct { return false }
+
+            // 大面积接触 = 手掌 / 小拇指侧面 → 直接忽略
+            if touch.majorRadius > DrawingCanvas.maxFingerRadius { return false }
+
+            return true
         }
 
         // MARK: 缩放
@@ -614,8 +664,6 @@ struct DrawingCanvas: UIViewRepresentable {
             case .ended, .cancelled:
                 let dx = g.translation(in: scroll).x
                 let vx = g.velocity(in: scroll).x
-                // UIPanGestureRecognizer 没有 predictedEndTranslation，
-                // 用速度估一下惯性滑行距离（约 0.35 秒的减速）
                 onPagePanEnded(dx, dx + vx * 0.35)
 
             default:
@@ -656,10 +704,30 @@ struct DrawingCanvas: UIViewRepresentable {
 
         func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
             onDrawingStateChanged(true)
+
+            guard pencilOnly else { return }
+
+            resumeWorkItem?.cancel()
+            resumeWorkItem = nil
+            isPencilDrawing = true
+            syncPageGestures()
         }
 
         func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
             onDrawingStateChanged(false)
+
+            guard pencilOnly else { return }
+
+            // 抬笔后延迟 0.35 秒再恢复翻页手势，
+            // 避免写字两笔之间、手掌还搭在屏上时被误触
+            resumeWorkItem?.cancel()
+            let item = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.isPencilDrawing = false
+                self.syncPageGestures()
+            }
+            resumeWorkItem = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: item)
         }
 
         // MARK: 手势动作
