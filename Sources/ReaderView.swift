@@ -62,7 +62,19 @@ struct BookReaderView: View {
     @State private var showThumbnails = false
     @State private var showOutline = false
     @State private var showLayers = false
+
+    /// 调整范围的目标页
+    @State private var adjustPageIndex: Int? = nil
     @State private var showImageAdjust = false
+
+    /// 替换图片的目标页（导入照片到当前页）
+    @State private var replacePageIndex: Int? = nil
+
+    /// 浮出的「左页 / 右页」选择
+    @State private var choiceIndices: [Int] = []
+    @State private var choiceTitle = ""
+    @State private var choiceIsReplace = false
+    @State private var showChoice = false
 
     @State private var didAutoAppend = false
 
@@ -76,7 +88,6 @@ struct BookReaderView: View {
     @State private var pdfImportTotal = 0
     @State private var pdfImportDone = 0
 
-    /// 纸张位图缓存（白纸 + 左右页图片渲染成的图）
     private static let paperCache = NSCache<NSString, UIImage>()
 
     private var book: Book? { library.book(id: bookID) }
@@ -112,11 +123,19 @@ struct BookReaderView: View {
                       matching: .images)
         .onChange(of: photoItems) { items in
             guard !items.isEmpty else { return }
-            Task { await importFromPhotos(items) }
+
+            let target = replacePageIndex
+            replacePageIndex = nil
+
+            if let target {
+                Task { await replacePhoto(items, at: target) }
+            } else {
+                Task { await importFromPhotos(items) }
+            }
         }
         .fileImporter(isPresented: $showFileImporter,
-                      allowedContentTypes: [.image, .pdf],
-                      allowsMultipleSelection: true) { result in
+                      allowedContentTypes: [.pdf, .image],
+                      allowsMultipleSelection: false) { result in
             importFromFiles(result)
         }
         .sheet(isPresented: $showThumbnails) {
@@ -156,7 +175,9 @@ struct BookReaderView: View {
             }
         }
         .sheet(isPresented: $showImageAdjust) {
-            if let book, let pageIndex = currentPageIndexForAdjust(book: book) {
+            if let book,
+               let pageIndex = adjustPageIndex,
+               book.pages.indices.contains(pageIndex) {
                 ImageAdjustView(page: book.pages[pageIndex],
                                 book: book) { newTransform in
                     guard var updated = library.book(id: bookID),
@@ -166,6 +187,21 @@ struct BookReaderView: View {
                     Self.paperCache.removeAllObjects()
                 }
             }
+        }
+        .confirmationDialog(choiceTitle,
+                            isPresented: $showChoice,
+                            titleVisibility: .visible) {
+            ForEach(choiceIndices, id: \.self) { idx in
+                Button("第 \(idx + 1) 页") {
+                    if choiceIsReplace {
+                        beginReplacePhoto(at: idx)
+                    } else {
+                        adjustPageIndex = idx
+                        showImageAdjust = true
+                    }
+                }
+            }
+            Button("取消", role: .cancel) { }
         }
         .preferredColorScheme(.dark)
         .onChange(of: library.book(id: bookID)?.pages.count ?? 0) { _ in
@@ -305,9 +341,6 @@ struct BookReaderView: View {
         }
         .frame(width: available.width, height: available.height)
         .contentShape(Rectangle())
-        // 阅读模式（没有画布）：翻页用 SwiftUI 手势。
-        // 编辑模式：这两个手势内部会直接 return，翻页改由画布内部的
-        // UIKit 手势处理（那边能把 Apple Pencil 排除掉）。
         .gesture(turnGesture(size: size, book: book))
         .simultaneousGesture(edgeTapGesture(available: available, book: book))
     }
@@ -421,7 +454,7 @@ struct BookReaderView: View {
         }
     }
 
-    // MARK: - 翻页场景
+    // MARK: - 翻页场景（翻动的那张纸放在裁剪层之外，可以探出书框）
 
     @ViewBuilder
     private func spreadOrSingleFlipping(book: Book, size: ReaderSize,
@@ -452,24 +485,36 @@ struct BookReaderView: View {
                                                    binding: book.bindingDirection)
 
             ZStack {
-                SpreadCanvasView(book: book,
-                                 spread: toSpread,
-                                 pageWidth: pw,
-                                 pageHeight: ph,
-                                 drawingRevision: layerStore.version,
-                                 showDrawing: false,
-                                 theme: theme)
-                    .frame(width: pw * 2, height: ph)
-                    .allowsHitTesting(false)
-                    .overlay {
-                        bakedLayers(book: book,
-                                    spreadIndex: to,
-                                    size: CGSize(width: pw * 2, height: ph))
-                    }
+                // ① 静止层：目标跨页，裁在书框里
+                ZStack {
+                    SpreadCanvasView(book: book,
+                                     spread: toSpread,
+                                     pageWidth: pw,
+                                     pageHeight: ph,
+                                     drawingRevision: layerStore.version,
+                                     showDrawing: false,
+                                     theme: theme)
+                        .frame(width: pw * 2, height: ph)
+                        .allowsHitTesting(false)
+                        .overlay {
+                            bakedLayers(book: book,
+                                        spreadIndex: to,
+                                        size: CGSize(width: pw * 2, height: ph))
+                        }
 
-                pageOrPaper(book: book, index: fromSides.left, size: size)
-                    .position(x: pw / 2, y: ph / 2)
+                    pageOrPaper(book: book, index: fromSides.left, size: size)
+                        .position(x: pw / 2, y: ph / 2)
+                }
+                .frame(width: pw * 2, height: ph)
+                .clipShape(RoundedRectangle(cornerRadius: bookCornerRadius,
+                                            style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: bookCornerRadius,
+                                     style: .continuous)
+                        .stroke(PaperStyle.border, lineWidth: 0.5)
+                )
 
+                // ② 翻动的那张纸：不在裁剪层里，转动时能探出书框
                 FlipCard(front: pageOrPaper(book: book, index: fromSides.right,
                                             size: size),
                          back: pageOrPaper(book: book, index: toSides.left,
@@ -484,8 +529,6 @@ struct BookReaderView: View {
                     .position(x: pw * 1.5, y: ph / 2)
             }
             .frame(width: pw * 2, height: ph)
-            .clipShape(RoundedRectangle(cornerRadius: bookCornerRadius,
-                                        style: .continuous))
         }
     }
 
@@ -498,20 +541,32 @@ struct BookReaderView: View {
 
         if book.pages.indices.contains(from), book.pages.indices.contains(to) {
             ZStack {
-                SinglePageView(book: book,
-                               pageIndex: to,
-                               pageWidth: pw,
-                               pageHeight: ph,
-                               drawingRevision: layerStore.version,
-                               showDrawing: false,
-                               theme: theme)
-                    .allowsHitTesting(false)
-                    .overlay {
-                        pageInkOverlay(book: book,
-                                       pageIndex: to,
-                                       size: size)
-                    }
+                // ① 静止层
+                ZStack {
+                    SinglePageView(book: book,
+                                   pageIndex: to,
+                                   pageWidth: pw,
+                                   pageHeight: ph,
+                                   drawingRevision: layerStore.version,
+                                   showDrawing: false,
+                                   theme: theme)
+                        .allowsHitTesting(false)
+                        .overlay {
+                            pageInkOverlay(book: book,
+                                           pageIndex: to,
+                                           size: size)
+                        }
+                }
+                .frame(width: pw, height: ph)
+                .clipShape(RoundedRectangle(cornerRadius: bookCornerRadius,
+                                            style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: bookCornerRadius,
+                                     style: .continuous)
+                        .stroke(PaperStyle.border, lineWidth: 0.5)
+                )
 
+                // ② 翻动的纸
                 FlipCard(front: pageOrPaper(book: book, index: from, size: size),
                          back: pageOrPaper(book: book, index: to, size: size),
                          angle: -Double(progress) * 180,
@@ -523,8 +578,6 @@ struct BookReaderView: View {
                     .frame(width: pw, height: ph)
             }
             .frame(width: pw, height: ph)
-            .clipShape(RoundedRectangle(cornerRadius: bookCornerRadius,
-                                        style: .continuous))
         }
     }
 
@@ -668,6 +721,71 @@ struct BookReaderView: View {
         )
     }
 
+    // MARK: - 当前页 / 本跨页的页列表
+
+    private func currentPageIndex(book: Book) -> Int {
+        if viewMode == .spread {
+            let spreads = SpreadLayout.spreads(for: book)
+            let clamped = min(max(currentUnit(book: book), 0),
+                              max(spreads.count - 1, 0))
+            return spreads[clamped].pageIndices.first ?? 0
+        } else {
+            return min(max(currentUnit(book: book), 0),
+                       max(book.pages.count - 1, 0))
+        }
+    }
+
+    /// 当前「看得见的这一页」有哪些页。
+    /// 双页模式下是左页 + 右页两页 —— 之前这里只返回左页，
+    /// 所以「调整本页范围」永远只能调左边那一页。
+    private func visiblePageIndices(book: Book) -> [Int] {
+        let total = book.pages.count
+        guard total > 0 else { return [] }
+
+        if viewMode == .spread {
+            let spreads = SpreadLayout.spreads(for: book)
+            let idx = min(max(currentUnit(book: book), 0), max(spreads.count - 1, 0))
+            let spread = spreads[idx]
+            let sides = SpreadLayout.visualSides(of: spread,
+                                                 binding: book.bindingDirection)
+            var out: [Int] = []
+            if let l = sides.left, l < total { out.append(l) }
+            if let r = sides.right, r < total, r != sides.left { out.append(r) }
+            return out
+        } else {
+            return [min(max(currentUnit(book: book), 0), total - 1)]
+        }
+    }
+
+    /// 「把照片导入到当前页」和「调整本页范围」都先走这里：
+    /// 只有一页就直接做，两页就先问用户选哪一页。
+    private func chooseVisiblePage(book: Book,
+                                   title: String,
+                                   isReplace: Bool) {
+        let indices = visiblePageIndices(book)
+        guard !indices.isEmpty else { return }
+
+        if indices.count == 1 {
+            if isReplace {
+                beginReplacePhoto(at: indices[0])
+            } else {
+                adjustPageIndex = indices[0]
+                showImageAdjust = true
+            }
+            return
+        }
+
+        choiceIndices = indices
+        choiceTitle = title
+        choiceIsReplace = isReplace
+        showChoice = true
+    }
+
+    private func beginReplacePhoto(at index: Int) {
+        replacePageIndex = index
+        showPhotoPicker = true
+    }
+
     // MARK: - 绘制画布
 
     private func paperImage(book: Book, spreadIndex: Int,
@@ -743,7 +861,6 @@ struct BookReaderView: View {
             threeFingerRedo: settings.threeFingerRedo,
             fourFingerClear: settings.fourFingerClear,
             longPressEyedropper: settings.longPressEyedropper,
-            // 手指翻页：交给画布内部的 UIKit 手势（能排除 Apple Pencil）
             pagePanEnabled: pagingEnabled && !fastJumpActive,
             pageTapEnabled: edgeTapActive,
             onPagePanChanged: { dx in
@@ -807,7 +924,6 @@ struct BookReaderView: View {
         }
     }
 
-    /// 把 penColor 解析成「纯数值」的 UIColor，不依赖深色 / 浅色外观。
     private func brushUIColor(alpha: CGFloat) -> UIColor {
         let a = min(max(alpha, 0), 1)
 
@@ -849,11 +965,6 @@ struct BookReaderView: View {
 
     // MARK: - 手势
 
-    /// 手指能否翻页。
-    ///
-    /// 阅读模式：可以。
-    /// 「仅 Pencil」模式：可以 —— 笔管画画，手指管翻页和手势。
-    /// 「手指 + Pencil」模式：不行，手指被画画占用了。
     private var pagingEnabled: Bool {
         if !isPenActive { return true }
         if settings.pencilOnlyDrawMode { return true }
@@ -868,9 +979,6 @@ struct BookReaderView: View {
         max(size.containerWidth * pageTurnDistanceFactor, minPageTurnDistance)
     }
 
-    /// 阅读模式下的翻页拖动。
-    /// 编辑模式下直接不响应 —— 那时候翻页由画布内部的 UIKit 手势接管，
-    /// 因为只有 UIKit 手势才能把 Apple Pencil 排除掉。
     private func turnGesture(size: ReaderSize, book: Book) -> some Gesture {
         DragGesture(minimumDistance: 6)
             .onChanged { value in
@@ -922,7 +1030,6 @@ struct BookReaderView: View {
             }
     }
 
-    /// 阅读模式下的边缘点击翻页。
     private func edgeTapGesture(available: CGSize, book: Book) -> some Gesture {
         SpatialTapGesture()
             .onEnded { value in
@@ -934,7 +1041,6 @@ struct BookReaderView: View {
             }
     }
 
-    /// 手指拖动中（相对起点的横向位移）—— 画布内部手势回调过来。
     private func turnDragChanged(_ dx: CGFloat, size: ReaderSize, book: Book) {
         guard pagingEnabled, !fastJumpActive else { return }
 
@@ -954,7 +1060,6 @@ struct BookReaderView: View {
         position = min(max(dragStartPosition + delta, 0), maxPos)
     }
 
-    /// 手指松手：按预测落点吸附 —— 画布内部手势回调过来。
     private func turnDragEnded(_ dx: CGFloat, _ predictedX: CGFloat,
                                size: ReaderSize, book: Book) {
         guard isDraggingPage else { return }
@@ -979,7 +1084,6 @@ struct BookReaderView: View {
         }
     }
 
-    /// 手指点击左右边缘 → 翻一页
     private func handleEdgeTap(at x: CGFloat, width: CGFloat, book: Book) {
         guard edgeTapActive, !fastJumpActive, width > 1 else { return }
 
@@ -1028,23 +1132,6 @@ struct BookReaderView: View {
             viewMode = .spread
             position = Double(sIndex)
         }
-    }
-
-    private func currentPageIndex(book: Book) -> Int {
-        if viewMode == .spread {
-            let spreads = SpreadLayout.spreads(for: book)
-            let clamped = min(max(currentUnit(book: book), 0),
-                              max(spreads.count - 1, 0))
-            return spreads[clamped].pageIndices.first ?? 0
-        } else {
-            return min(max(currentUnit(book: book), 0),
-                       max(book.pages.count - 1, 0))
-        }
-    }
-
-    private func currentPageIndexForAdjust(book: Book) -> Int? {
-        guard !book.pages.isEmpty else { return nil }
-        return currentPageIndex(book: book)
     }
 
     private func jump(toPage pageIdx: Int, book: Book) {
@@ -1256,6 +1343,17 @@ struct BookReaderView: View {
 
                 rowDivider
 
+                // 把照片导入到当前这一页（不新建）
+                toolButton(isActive: false, systemImage: "photo.badge.plus") {
+                    if let book {
+                        chooseVisiblePage(book: book,
+                                          title: "把照片导入到哪一页",
+                                          isReplace: true)
+                    }
+                }
+
+                rowDivider
+
                 toolButton(isActive: false, systemImage: "chevron.down") {
                     withAnimation(.spring(response: 0.30, dampingFraction: 0.82)) {
                         brushBarCollapsed = true
@@ -1441,8 +1539,26 @@ struct BookReaderView: View {
                     Label("图层", systemImage: "square.3.layers.3d")
                 }
 
+                Divider()
+
+                // 把照片导入到当前这一页（不新建）
                 Button {
-                    showImageAdjust = true
+                    if let book {
+                        chooseVisiblePage(book: book,
+                                          title: "把照片导入到哪一页",
+                                          isReplace: true)
+                    }
+                } label: {
+                    Label("导入照片到本页", systemImage: "photo.badge.plus")
+                }
+
+                // 调整本页图片范围（双页模式下可以选左页 / 右页）
+                Button {
+                    if let book {
+                        chooseVisiblePage(book: book,
+                                          title: "调整哪一页的图片范围",
+                                          isReplace: false)
+                    }
                 } label: {
                     Label("调整本页图片范围", systemImage: "crop")
                 }
@@ -1459,6 +1575,7 @@ struct BookReaderView: View {
 
                 Button {
                     importOccupiesSpread = false
+                    replacePageIndex = nil
                     showPhotoPicker = true
                 } label: {
                     Label("从照片导入（每张占一页）", systemImage: "photo")
@@ -1474,6 +1591,7 @@ struct BookReaderView: View {
 
                 Button {
                     importOccupiesSpread = true
+                    replacePageIndex = nil
                     showPhotoPicker = true
                 } label: {
                     Label("从照片导入（占整个跨页）",
@@ -1510,6 +1628,42 @@ struct BookReaderView: View {
 
     // MARK: - 导入
 
+    /// 把选中的照片替换到指定页（不新建页）
+    private func replacePhoto(_ items: [PhotosPickerItem], at index: Int) async {
+        defer { photoItems = [] }
+
+        guard let item = items.first,
+              let data = try? await item.loadTransferable(type: Data.self) else {
+            importMessage = "没能读取这张照片"
+            return
+        }
+
+        let ext = ImageFileType.fileExtension(for: data)
+        guard let name = try? FileStorage.saveImageData(data,
+                                                        preferredExtension: ext) else {
+            importMessage = "保存照片失败"
+            return
+        }
+
+        replacePageImage(at: index, fileName: name)
+    }
+
+    private func replacePageImage(at index: Int, fileName: String) {
+        guard var updated = library.book(id: bookID),
+              updated.pages.indices.contains(index) else { return }
+
+        let old = updated.pages[index].imageFileName
+
+        updated.pages[index].kind = .image
+        updated.pages[index].imageFileName = fileName
+        updated.pages[index].transform = .identity
+
+        library.update(updated)
+
+        if let old { FileStorage.deleteImage(named: old) }
+        Self.paperCache.removeAllObjects()
+    }
+
     private func importFromPhotos(_ items: [PhotosPickerItem]) async {
         var newPages: [Page] = []
         let occupies = importOccupiesSpread
@@ -1539,55 +1693,45 @@ struct BookReaderView: View {
             importMessage = "导入失败：\(error.localizedDescription)"
 
         case .success(let urls):
-            var imagePages: [Page] = []
-            var pdfURLs: [URL] = []
+            guard let url = urls.first else { return }
+
+            let accessing = url.startAccessingSecurityScopedResource()
+            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+
+            let ext = url.pathExtension.lowercased()
             let occupies = importOccupiesSpread
 
-            for url in urls {
-                let accessing = url.startAccessingSecurityScopedResource()
-                defer { if accessing { url.stopAccessingSecurityScopedResource() } }
-
-                let ext = url.pathExtension.lowercased()
-
-                if ext == "pdf" {
-                    let dest = FileStorage.documents
-                        .appendingPathComponent("import-\(UUID().uuidString).pdf")
-                    do {
-                        try FileManager.default.copyItem(at: url, to: dest)
-                        pdfURLs.append(dest)
-                    } catch {
-                        importMessage = "读取 PDF 失败：\(error.localizedDescription)"
-                    }
-                    continue
+            if ext == "pdf" {
+                let dest = FileStorage.temporaryPDFURL()
+                do {
+                    try FileManager.default.copyItem(at: url, to: dest)
+                } catch {
+                    importMessage = "读取 PDF 失败：\(error.localizedDescription)"
+                    return
                 }
-
-                guard let data = try? Data(contentsOf: url) else { continue }
-                let fileExt = ext.isEmpty
-                    ? ImageFileType.fileExtension(for: data)
-                    : ext
-
-                if let name = try? FileStorage.saveImageData(data,
-                                                             preferredExtension: fileExt) {
-                    imagePages.append(Page.image(fileName: name,
-                                                 occupiesSpread: occupies))
-                }
-            }
-
-            if !imagePages.isEmpty {
-                appendPages(imagePages)
-            }
-
-            if !pdfURLs.isEmpty {
                 Task { @MainActor in
-                    for pdfURL in pdfURLs {
-                        await importPDFPages(url: pdfURL, occupies: occupies)
-                    }
+                    await importPDFPages(url: dest, occupies: occupies)
+                    FileStorage.deleteTemporaryPDF(url: dest)
                 }
+                return
             }
 
-            if imagePages.isEmpty && pdfURLs.isEmpty && importMessage == nil {
-                importMessage = "没有导入任何内容"
+            guard let data = try? Data(contentsOf: url) else {
+                importMessage = "读取文件失败"
+                return
             }
+
+            let fileExt = ext.isEmpty
+                ? ImageFileType.fileExtension(for: data)
+                : ext
+
+            guard let name = try? FileStorage.saveImageData(data,
+                                                            preferredExtension: fileExt) else {
+                importMessage = "保存图片失败"
+                return
+            }
+
+            appendPages([Page.image(fileName: name, occupiesSpread: occupies)])
         }
     }
 
@@ -1607,19 +1751,21 @@ struct BookReaderView: View {
         for i in 0..<total {
             let page: Page? = await withCheckedContinuation { cont in
                 DispatchQueue.global(qos: .userInitiated).async {
-                    guard let image = PDFImporter.renderPage(url: url,
-                                                             index: i,
-                                                             maxPixel: 2400),
-                          let data = image.jpegData(compressionQuality: 0.92),
-                          let name = try? FileStorage.saveImageData(
-                              data,
-                              preferredExtension: "jpg"
-                          ) else {
-                        cont.resume(returning: nil)
-                        return
+                    autoreleasepool {
+                        guard let image = PDFImporter.renderPage(url: url,
+                                                                 index: i,
+                                                                 maxPixel: 2400),
+                              let data = image.jpegData(compressionQuality: 0.9),
+                              let name = try? FileStorage.saveImageData(
+                                  data,
+                                  preferredExtension: "jpg"
+                              ) else {
+                            cont.resume(returning: nil)
+                            return
+                        }
+                        cont.resume(returning: Page.image(fileName: name,
+                                                         occupiesSpread: occupies))
                     }
-                    cont.resume(returning: Page.image(fileName: name,
-                                                     occupiesSpread: occupies))
                 }
             }
 
