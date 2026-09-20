@@ -98,7 +98,6 @@ struct Book: Identifiable, Codable, Hashable {
 
     init() {}
 
-    // 手写解码：老数据缺字段也能读出来，升级不丢书
     enum CodingKeys: String, CodingKey {
         case id, title, bindingDirection, defaultViewMode, pageAspectRatio
         case coverPageAlone, coverStyle, customCoverImage, outline
@@ -127,7 +126,6 @@ struct Book: Identifiable, Codable, Hashable {
 
 // MARK: - 跨页
 
-/// 一个跨页（阅读单位 + 绘制单位）。由 Book.pages 实时计算，不落库。
 struct Spread: Identifiable, Hashable {
     let index: Int
     let leftPageIndex: Int?
@@ -205,7 +203,6 @@ enum SpreadLayout {
         spreads(for: book).first(where: { $0.pageIndices.contains(pageIndex) })
     }
 
-    /// 按翻页方向决定左右两个槽位各放哪一页
     static func visualSides(of spread: Spread,
                             binding: BindingDirection) -> (left: Int?, right: Int?) {
         switch binding {
@@ -228,11 +225,21 @@ struct AppSettings: Codable, Equatable {
     var pinchThreshold: Double = 0.15
     var readerTheme: ReaderTheme = .classic
 
+    // 手势总开关
+    var gesturesEnabled: Bool = true
+    var twoFingerUndo: Bool = true
+    var twoFingerLongPressUndo: Bool = true
+    var threeFingerRedo: Bool = true
+    var fourFingerClear: Bool = true
+    var longPressEyedropper: Bool = true
+
     init() {}
 
     enum CodingKeys: String, CodingKey {
         case pencilOnlyDrawMode, autoAppendPage, edgeTapTurn
         case zoomPersistOnTurn, pageTurnSound, pinchThreshold, readerTheme
+        case gesturesEnabled, twoFingerUndo, twoFingerLongPressUndo
+        case threeFingerRedo, fourFingerClear, longPressEyedropper
     }
 
     init(from decoder: Decoder) throws {
@@ -249,5 +256,17 @@ struct AppSettings: Codable, Equatable {
                                                forKey: .pinchThreshold) ?? 0.15
         readerTheme = try c.decodeIfPresent(ReaderTheme.self,
                                             forKey: .readerTheme) ?? .classic
+        gesturesEnabled = try c.decodeIfPresent(Bool.self,
+                                                forKey: .gesturesEnabled) ?? true
+        twoFingerUndo = try c.decodeIfPresent(Bool.self,
+                                              forKey: .twoFingerUndo) ?? true
+        twoFingerLongPressUndo = try c.decodeIfPresent(
+            Bool.self, forKey: .twoFingerLongPressUndo) ?? true
+        threeFingerRedo = try c.decodeIfPresent(Bool.self,
+                                                forKey: .threeFingerRedo) ?? true
+        fourFingerClear = try c.decodeIfPresent(Bool.self,
+                                                forKey: .fourFingerClear) ?? true
+        longPressEyedropper = try c.decodeIfPresent(
+            Bool.self, forKey: .longPressEyedropper) ?? true
     }
 }
