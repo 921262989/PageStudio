@@ -11,7 +11,6 @@ struct DrawingCanvas: UIViewRepresentable {
     let displaySize: CGSize
 
     /// 纸张位图（白纸 + 左右页图片）。
-    /// 它和笔迹放在同一个缩放容器里，所以双指放大时纸和字一起变大。
     var paperImage: UIImage? = nil
 
     // 上下文
@@ -45,12 +44,12 @@ struct DrawingCanvas: UIViewRepresentable {
     let onPickColor: (Color) -> Void
     var onZoomChanged: (CGFloat) -> Void = { _ in }
 
-    /// ⚠️ 画布里的所有自定义手势只接受「手指」触摸，刻意排除 Apple Pencil。
+    /// ⚠️ 所有自定义手势只接受「手指」触摸，刻意排除 Apple Pencil。
     ///
     /// UIGestureRecognizer 默认连 Pencil 的触摸一起收。写字时
     /// 「笔尖 + 搭在屏上的小拇指」就是两个触摸点，会被当成双指手势，
-    /// 画布于是开始平移 / 缩放 —— 写字时画布乱飘就是这么来的。
-    /// 钉死为 finger 之后：笔只画画，手势只认手指。
+    /// 画布于是开始平移 / 缩放。钉死为 finger 之后：
+    /// 笔只画画，手势只认手指。
     static let fingerOnly: [NSNumber] = [
         NSNumber(value: UITouch.TouchType.direct.rawValue)
     ]
@@ -86,12 +85,11 @@ struct DrawingCanvas: UIViewRepresentable {
         scroll.maximumZoomScale = fit * 6
         scroll.setZoomScale(fit, animated: false)
 
-        // 系统自带的 pinch / pan 全部关掉
-        // （给它们设 delegate 会崩，不设又抢不过画布，所以下面自己造）
+        // 系统自带的 pinch / pan 关掉（给它们设 delegate 会崩，不设又抢不过画布）
         scroll.pinchGestureRecognizer?.isEnabled = false
         scroll.panGestureRecognizer.isEnabled = false
 
-        // 缩放容器：纸张和笔迹都在这里面，才能一起变大
+        // 缩放容器：纸张和笔迹都在里面，才能一起变大
         let container = UIView(frame: CGRect(origin: .zero, size: canvasSize))
         container.backgroundColor = .clear
         container.clipsToBounds = true
@@ -110,8 +108,6 @@ struct DrawingCanvas: UIViewRepresentable {
         canvas.bounds = CGRect(origin: .zero, size: canvasSize)
         canvas.backgroundColor = .clear
         canvas.isOpaque = false
-
-        // 画布钉死在亮色外观，避免深色外观下笔迹着色和导出图不一致
         canvas.overrideUserInterfaceStyle = .light
 
         canvas.drawing = initialDrawing
@@ -126,7 +122,6 @@ struct DrawingCanvas: UIViewRepresentable {
         canvas.panGestureRecognizer.isEnabled = false
         canvas.delegate = context.coordinator
 
-        // 画布自带的画图手势默认独占触摸，必须允许它和其他手势同时识别
         canvas.drawingGestureRecognizer.delegate = context.coordinator
 
         container.addSubview(canvas)
@@ -137,7 +132,6 @@ struct DrawingCanvas: UIViewRepresentable {
         context.coordinator.scroll = scroll
         context.coordinator.canvas = canvas
         context.coordinator.container = container
-        context.coordinator.pencilOnly = pencilOnly
         context.coordinator.lastToolSignature = toolSignature
         context.coordinator.initialOffsetX = initialOffsetX
         context.coordinator.lastInitialOffsetX = initialOffsetX
@@ -253,16 +247,13 @@ struct DrawingCanvas: UIViewRepresentable {
         context.coordinator.book = book
         context.coordinator.spreadIndex = spreadIndex
         context.coordinator.displaySize = displaySize
-        context.coordinator.pencilOnly = pencilOnly
 
-        // 纸张图有更新就换上（换页 / 图片范围调整后）
         if let paper = context.coordinator.paperView {
             if paper.image !== paperImage {
                 paper.image = paperImage
             }
         }
 
-        // 尺寸比较必须带容差，否则浮点误差会每次重算都重置缩放
         let viewportChanged =
             abs(scroll.bounds.width - viewportSize.width) > 0.5 ||
             abs(scroll.bounds.height - viewportSize.height) > 0.5
@@ -296,7 +287,6 @@ struct DrawingCanvas: UIViewRepresentable {
             scroll.contentSize = canvasSize
         }
 
-        // 只有「单页模式切换左右页」才调整偏移，绝不动缩放
         if abs(context.coordinator.lastInitialOffsetX - initialOffsetX) > 0.5 {
             context.coordinator.lastInitialOffsetX = initialOffsetX
 
@@ -355,8 +345,8 @@ struct DrawingCanvas: UIViewRepresentable {
         context.coordinator.eyedropperGesture?.isEnabled =
             on && longPressEyedropper && pencilOnly
 
-        // 双指缩放 / 平移：始终开启，任何模式下都不关。
-        // Apple Pencil 已经被 allowedTouchTypes 排除在外，笔不会误触发它们。
+        // 双指缩放 / 平移始终开启。Apple Pencil 已被 allowedTouchTypes 排除，
+        // 笔不会误触发它们。
         context.coordinator.customPinch?.isEnabled = true
         context.coordinator.twoFingerPan?.isEnabled = true
     }
@@ -405,7 +395,6 @@ struct DrawingCanvas: UIViewRepresentable {
         var spreadIndex: Int = 0
         var displaySize: CGSize = .zero
         var initialOffsetX: CGFloat = 0
-        var pencilOnly: Bool = false
 
         var lastToolSignature: String = ""
         var lastUndoTrigger: Int = 0
@@ -448,8 +437,6 @@ struct DrawingCanvas: UIViewRepresentable {
 
         // MARK: 缩放
 
-        /// 返回「纸张 + 笔迹」的容器，不是画布本身。
-        /// 只返回画布的话，捏合时只有笔迹在变大，纸不动。
         func viewForZooming(in scrollView: UIScrollView) -> UIView? {
             container ?? canvas
         }
@@ -692,7 +679,6 @@ struct DrawingCanvas: UIViewRepresentable {
 
 /// 铺在书页上面的一层透明视图，专门接管「手指」的拖动和点击。
 ///
-/// 为什么需要它：
 /// SwiftUI 的 DragGesture / SpatialTapGesture 分不清手指和 Apple Pencil，
 /// Pencil 划过纸边也会被算成翻页拖动。UIKit 的手势可以限制触摸类型，
 /// 所以这里换成 UIKit 手势，并把触摸类型钉死为「手指」。
@@ -706,7 +692,7 @@ struct FingerGestureLayer: UIViewRepresentable {
 
     /// 拖动中：相对起点的横向位移
     var onPanChanged: (CGFloat) -> Void
-    /// 松手：实际位移 + 预测位移
+    /// 松手：实际位移 + 预测落点位移
     var onPanEnded: (CGFloat, CGFloat) -> Void
     /// 点击：位置（相对本层）
     var onTap: (CGPoint) -> Void
@@ -757,12 +743,20 @@ struct FingerGestureLayer: UIViewRepresentable {
 
         @objc func handlePan(_ g: UIPanGestureRecognizer) {
             guard let host else { return }
+
             switch g.state {
             case .changed:
                 parent.onPanChanged(g.translation(in: host).x)
+
             case .ended, .cancelled:
-                parent.onPanEnded(g.translation(in: host).x,
-                                  g.predictedEndTranslation(in: host).x)
+                let dx = g.translation(in: host).x
+                let vx = g.velocity(in: host).x
+
+                // UIPanGestureRecognizer 没有 predictedEndTranslation
+                // （那是 SwiftUI DragGesture 才有的），
+                // 这里用速度估一下惯性滑行的距离：约 0.35 秒的减速。
+                parent.onPanEnded(dx, dx + vx * 0.35)
+
             default:
                 break
             }
