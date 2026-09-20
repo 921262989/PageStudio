@@ -42,7 +42,9 @@ struct BookReaderView: View {
     @State private var isPenActive = false
     @State private var activeTool: ActiveTool = .brush(.pen)
     @State private var penColor: Color = Color(white: 0.06)
-    @State private var eraserKind: EraserKind = .precise
+
+    // 默认就是矢量橡皮
+    @State private var eraserKind: EraserKind = .vector
     @State private var eraserWidth: EraserWidth = .medium
 
     @State private var undoTrigger = 0
@@ -443,7 +445,15 @@ struct BookReaderView: View {
         }
     }
 
-    // MARK: - 翻页场景（翻动的纸在裁剪层之外，可探出书框；圆角加在纸自己身上）
+    // MARK: - 翻页场景
+    //
+    // 要点：
+    //  · 静止的整跨页：四角圆角（左页左两角 + 右页右两角，中线是直角）
+    //  · 翻动的那张纸：只在「外侧」有圆角 ——
+    //      正面是右页 → 只圆右边两角
+    //      背面是左页 → 只圆左边两角
+    //    中线那一侧永远是直角，跟真书一样。
+    //  · 不给纸张整体加裁剪，这样它转动时能探出书框。
 
     @ViewBuilder
     private func spreadOrSingleFlipping(book: Book, size: ReaderSize,
@@ -474,7 +484,7 @@ struct BookReaderView: View {
                                                    binding: book.bindingDirection)
 
             ZStack {
-                // ① 静止层：目标跨页，裁在书框里
+                // ① 静止层：目标跨页，裁在书框里（四角圆角）
                 ZStack {
                     SpreadCanvasView(book: book,
                                      spread: toSpread,
@@ -503,12 +513,20 @@ struct BookReaderView: View {
                         .stroke(PaperStyle.border, lineWidth: 0.5)
                 )
 
-                // ② 翻动的那张纸：不在裁剪层里，能探出书框；
-                //    圆角直接加在纸自己身上，所以右边那页不会变成直角。
-                FlipCard(front: pageOrPaper(book: book, index: fromSides.right,
-                                            size: size),
-                         back: pageOrPaper(book: book, index: toSides.left,
-                                           size: size),
+                // ② 翻动的那张纸：不整体裁剪 → 能探出书框；
+                //    圆角只加在外侧边缘，中线保持直角。
+                FlipCard(front: pageOrPaper(book: book,
+                                            index: fromSides.right,
+                                            size: size)
+                            .clipShape(PageCornerShape(radius: bookCornerRadius,
+                                                       corners: [.topRight,
+                                                                 .bottomRight])),
+                         back: pageOrPaper(book: book,
+                                           index: toSides.left,
+                                           size: size)
+                            .clipShape(PageCornerShape(radius: bookCornerRadius,
+                                                       corners: [.topLeft,
+                                                                 .bottomLeft])),
                          angle: -Double(progress) * 180,
                          anchor: .leading,
                          perspective: 0.32,
@@ -516,8 +534,6 @@ struct BookReaderView: View {
                          paperColor: PaperStyle.fill,
                          borderColor: PaperStyle.border)
                     .frame(width: pw, height: ph)
-                    .clipShape(RoundedRectangle(cornerRadius: bookCornerRadius,
-                                                style: .continuous))
                     .position(x: pw * 1.5, y: ph / 2)
             }
             .frame(width: pw * 2, height: ph)
@@ -557,8 +573,13 @@ struct BookReaderView: View {
                         .stroke(PaperStyle.border, lineWidth: 0.5)
                 )
 
-                FlipCard(front: pageOrPaper(book: book, index: from, size: size),
-                         back: pageOrPaper(book: book, index: to, size: size),
+                // 单页模式：一页独自呈现，两侧都是外侧 → 四角圆角
+                FlipCard(front: pageOrPaper(book: book, index: from, size: size)
+                            .clipShape(RoundedRectangle(cornerRadius: bookCornerRadius,
+                                                        style: .continuous)),
+                         back: pageOrPaper(book: book, index: to, size: size)
+                            .clipShape(RoundedRectangle(cornerRadius: bookCornerRadius,
+                                                        style: .continuous)),
                          angle: -Double(progress) * 180,
                          anchor: .leading,
                          perspective: 0.32,
@@ -566,8 +587,6 @@ struct BookReaderView: View {
                          paperColor: PaperStyle.fill,
                          borderColor: PaperStyle.border)
                     .frame(width: pw, height: ph)
-                    .clipShape(RoundedRectangle(cornerRadius: bookCornerRadius,
-                                                style: .continuous))
             }
             .frame(width: pw, height: ph)
         }
@@ -1785,6 +1804,23 @@ struct BookReaderView: View {
         } else {
             position = Double(startIndex)
         }
+    }
+}
+
+// MARK: - 单侧圆角（真书那种：左页只圆左边，右页只圆右边）
+
+/// 只给指定的角做圆角，其余边角保持直角。
+/// 双页模式里，翻动的那张纸用这个 —— 外侧圆、靠中线那侧直角。
+struct PageCornerShape: Shape {
+    var radius: CGFloat
+    var corners: UIRectCorner
+
+    func path(in rect: CGRect) -> Path {
+        let r = min(max(radius, 0), min(rect.width, rect.height) / 2)
+        let bezier = UIBezierPath(roundedRect: rect,
+                                  byRoundingCorners: corners,
+                                  cornerRadii: CGSize(width: r, height: r))
+        return Path(bezier.cgPath)
     }
 }
 
