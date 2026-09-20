@@ -35,18 +35,9 @@ struct BookReaderView: View {
 
     private let pageTurnDistanceFactor: CGFloat = 0.20
     private let minPageTurnDistance: CGFloat = 96
-    /// 松手时跨越超过这么多页，就不做逐页动画，直接落位
     private let longJumpThreshold: Double = 3.0
 
-    /// 快速定位中（拖进度条 / 一次跨很多页）：画面降级成「白纸 + 页码」，
-    /// 中间页面完全不渲染，防卡顿、防内存爆掉
     @State private var fastJumpActive = false
-
-    /// 正在落笔。落笔期间绝对不翻页。
-    /// SwiftUI 的 DragGesture 分不清手指和 Apple Pencil，
-    /// Pencil 划过纸边一样会算成拖动 → 画着画着就翻页。
-    /// 这个值由 PKCanvasView 的落笔 / 抬笔回调驱动。
-    @State private var isDrawingNow = false
 
     @State private var isPenActive = false
     @State private var activeTool: ActiveTool = .brush(.pen)
@@ -85,8 +76,7 @@ struct BookReaderView: View {
     @State private var pdfImportTotal = 0
     @State private var pdfImportDone = 0
 
-    /// 纸张位图缓存（白纸 + 左右页图片渲染成的图），
-    /// 它跟笔迹放在同一个缩放容器里，所以放大时纸和字一起变大。
+    /// 纸张位图缓存（白纸 + 左右页图片渲染成的图）
     private static let paperCache = NSCache<NSString, UIImage>()
 
     private var book: Book? { library.book(id: bookID) }
@@ -173,7 +163,6 @@ struct BookReaderView: View {
                           updated.pages.indices.contains(pageIndex) else { return }
                     updated.pages[pageIndex].transform = newTransform
                     library.update(updated)
-                    // 图片范围变了：丢掉旧纸张图，下次进入编辑会重新渲染
                     Self.paperCache.removeAllObjects()
                 }
             }
@@ -183,7 +172,6 @@ struct BookReaderView: View {
             clampPosition()
         }
         .onChange(of: isPenActive) { active in
-            // 进出编辑模式时丢掉旧的纸张位图，避免图片变化后还显示旧纸
             Self.paperCache.removeAllObjects()
 
             if active {
@@ -192,7 +180,6 @@ struct BookReaderView: View {
                 }
             } else {
                 activePopover = nil
-                isDrawingNow = false
             }
         }
         .alert("提示",
@@ -261,8 +248,6 @@ struct BookReaderView: View {
                    value: activePopover)
     }
 
-    /// 笔刷 / 橡皮设置面板，直接贴在工具栏上方的浮层卡片。
-    /// 以前用 .popover(item:) 挂在整屏视图上，iPad 上拿不到锚点会静默不显示。
     @ViewBuilder
     private func toolPanel(_ item: ToolPopover) -> some View {
         switch item {
@@ -317,14 +302,29 @@ struct BookReaderView: View {
             } else {
                 stableScene(book: book, size: size, index: from)
             }
+
+            // 书页上的翻页 / 边缘点击，全部交给「只认手指」的那一层。
+            // Apple Pencil 的触摸会穿透过去落到画布上，笔永远碰不到翻页。
+            FingerGestureLayer(
+                panEnabled: pagingEnabled && !fastJumpActive,
+                tapEnabled: edgeTapActive,
+                onPanChanged: { dx in
+                    turnDragChanged(dx, size: size, book: book)
+                },
+                onPanEnded: { dx, predicted in
+                    turnDragEnded(dx, predicted, size: size, book: book)
+                },
+                onTap: { point in
+                    handleEdgeTap(at: point.x,
+                                  width: available.width,
+                                  book: book)
+                }
+            )
         }
         .frame(width: available.width, height: available.height)
         .contentShape(Rectangle())
-        .gesture(turnGesture(size: size, book: book))
-        .simultaneousGesture(edgeTapGesture(available: available, book: book))
     }
 
-    /// 快速定位时的降级画面：只画一张白纸 + 位置文字。
     @ViewBuilder
     private func quickJumpScene(book: Book, size: ReaderSize) -> some View {
         VStack(spacing: 12) {
@@ -345,7 +345,6 @@ struct BookReaderView: View {
         )
     }
 
-    /// 把 0 / 1 / 2… 的位置值翻译成「跨页 3-4」或「第 5 / 120 页」
     private func unitLabel(at value: Double, book: Book) -> String {
         if viewMode == .spread {
             let count = max(SpreadLayout.spreads(for: book).count, 1)
@@ -391,7 +390,6 @@ struct BookReaderView: View {
                              drawingRevision: 0,
                              showDrawing: false,
                              theme: theme)
-                // 底图只是背景，不能吃触摸，否则双指手势会被它挡掉
                 .allowsHitTesting(false)
 
             ForEach(layers) { meta in
@@ -408,7 +406,6 @@ struct BookReaderView: View {
                                  size: spreadSize,
                                  revision: layerStore.version,
                                  opacity: meta.opacity)
-                        // 笔迹图盖在画布上面，不关掉命中测试会吃掉双指手势
                         .allowsHitTesting(false)
                 }
             }
@@ -559,11 +556,9 @@ struct BookReaderView: View {
                 }
             }
         }
-        // 整层笔迹图都不参与触摸，避免挡住画布的手势
         .allowsHitTesting(false)
     }
 
-    /// 单页上的笔迹叠层。右半页要向左偏移半页宽，否则会显示成左页的笔迹。
     @ViewBuilder
     private func pageInkOverlay(book: Book, pageIndex: Int, size: ReaderSize) -> some View {
         let sIndex = SpreadLayout.spreadIndex(containingPage: pageIndex, in: book)
@@ -688,8 +683,6 @@ struct BookReaderView: View {
 
     // MARK: - 绘制画布
 
-    /// 把「白纸 + 左右页图片」渲染成一张位图，作为画布的背景。
-    /// 它会和笔迹放进同一个缩放容器 → 双指放大时纸和字一起变大。
     private func paperImage(book: Book, spreadIndex: Int,
                             logical: CGSize) -> UIImage? {
         let key = "paper-\(book.id.uuidString)-\(spreadIndex)"
@@ -771,13 +764,7 @@ struct BookReaderView: View {
                 handleAutoAppend(book: book, spreadIndex: spreadIndex,
                                  drawing: newDrawing)
             },
-            onDrawingStateChanged: { drawing in
-                // 落笔 / 抬笔：落笔期间禁止翻页，
-                // 这样 Apple Pencil 从纸中间划到边缘也不会翻页。
-                DispatchQueue.main.async {
-                    isDrawingNow = drawing
-                }
-            },
+            onDrawingStateChanged: { _ in },
             onPickColor: { picked in
                 DispatchQueue.main.async {
                     penColor = picked
@@ -821,12 +808,7 @@ struct BookReaderView: View {
         }
     }
 
-    /// 把 penColor 解析成「纯数值」的 UIColor。
-    ///
-    /// 不走 UIColor(Color)：那次转换依赖当前外观（深色 / 浅色），
-    /// 在这个强制深色的阅读器里可能把黑和白解析反 ——
-    /// 表现就是「编辑里看着是黑，画出来是白，退出编辑又正常」。
-    /// 这里优先用 cgColor 的数值分量，完全脱离外观。
+    /// 把 penColor 解析成「纯数值」的 UIColor，不依赖深色 / 浅色外观。
     private func brushUIColor(alpha: CGFloat) -> UIColor {
         let a = min(max(alpha, 0), 1)
 
@@ -868,14 +850,17 @@ struct BookReaderView: View {
 
     // MARK: - 手势
 
+    /// 手指能否拖动翻页。
+    ///
+    /// 阅读模式：随时可以。
+    /// 「仅 Pencil」模式：手指可以 —— 笔只管画画，手指管翻页和手势。
+    /// 「手指 + Pencil」模式：不行，手指被画画占用了，翻页用底部进度条。
+    ///
+    /// 注意：Apple Pencil 已经被 FingerGestureLayer 用 allowedTouchTypes 排除，
+    /// 所以这里不需要再关心"笔正在画"这件事。
     private var pagingEnabled: Bool {
-        // 正在落笔：绝不翻页
-        if isDrawingNow { return false }
-        // 阅读模式：随时可以翻
         if !isPenActive { return true }
-        // 编辑模式（仅 Pencil）：没在画的时候，手指可以翻页
         if settings.pencilOnlyDrawMode { return true }
-        // 编辑模式（手指 + Pencil）：手指一碰就是画线，无法翻页
         return false
     }
 
@@ -887,74 +872,65 @@ struct BookReaderView: View {
         max(size.containerWidth * pageTurnDistanceFactor, minPageTurnDistance)
     }
 
-    private func turnGesture(size: ReaderSize, book: Book) -> some Gesture {
-        DragGesture(minimumDistance: 6)
-            .onChanged { value in
-                guard pagingEnabled, !fastJumpActive else { return }
+    /// 手指拖动中（相对起点的横向位移）。
+    private func turnDragChanged(_ dx: CGFloat, size: ReaderSize, book: Book) {
+        guard pagingEnabled, !fastJumpActive else { return }
 
-                let dx = value.translation.width
-                let dy = value.translation.height
-                guard abs(dx) > abs(dy) * 1.1 else { return }
+        if !isDraggingPage {
+            isDraggingPage = true
+            dragStartPosition = position
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        }
 
-                if !isDraggingPage {
-                    isDraggingPage = true
-                    dragStartPosition = position
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                }
+        let turnDistance = pageTurnDistance(size: size)
+        let direction: Double = (book.bindingDirection == .leftToRight) ? -1 : 1
+        let delta = Double(dx / turnDistance) * direction
 
-                let turnDistance = pageTurnDistance(size: size)
-                let direction: Double = (book.bindingDirection == .leftToRight) ? -1 : 1
-                let delta = Double(dx / turnDistance) * direction
+        let count = readerUnitCount(book: book)
+        let maxPos = Double(max(count - 1, 0))
 
-                let count = readerUnitCount(book: book)
-                let maxPos = Double(max(count - 1, 0))
-
-                position = min(max(dragStartPosition + delta, 0), maxPos)
-            }
-            .onEnded { value in
-                guard isDraggingPage else { return }
-                isDraggingPage = false
-
-                let count = readerUnitCount(book: book)
-                let maxPos = Double(max(count - 1, 0))
-                let turnDistance = pageTurnDistance(size: size)
-                let direction: Double = (book.bindingDirection == .leftToRight) ? -1 : 1
-
-                let predictedDelta = Double(value.predictedEndTranslation.width
-                                            / turnDistance) * direction
-                let predicted = dragStartPosition + predictedDelta
-                let target = min(max(predicted.rounded(), 0), maxPos)
-
-                if abs(target - dragStartPosition) > longJumpThreshold {
-                    // 一次跨太多页：不做逐页动画，避免逐帧渲染中间页
-                    quickJump(to: target, book: book)
-                } else {
-                    withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
-                        position = target
-                    }
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                }
-            }
+        position = min(max(dragStartPosition + delta, 0), maxPos)
     }
 
-    private func edgeTapGesture(available: CGSize, book: Book) -> some Gesture {
-        SpatialTapGesture()
-            .onEnded { value in
-                guard edgeTapActive, !isDrawingNow else { return }
-                let w = available.width
-                let x = value.location.x
+    /// 手指松手：按预测落点吸附。
+    private func turnDragEnded(_ dx: CGFloat, _ predictedX: CGFloat,
+                               size: ReaderSize, book: Book) {
+        guard isDraggingPage else { return }
+        isDraggingPage = false
 
-                if x < w * 0.16 {
-                    withAnimation(.spring(response: 0.38, dampingFraction: 0.88)) {
-                        position = max(position - 1, 0)
-                    }
-                } else if x > w * 0.84 {
-                    let maxPos = Double(max(readerUnitCount(book: book) - 1, 0))
-                    withAnimation(.spring(response: 0.38, dampingFraction: 0.88)) {
-                        position = min(position + 1, maxPos)
-                    }
-                }
+        let count = readerUnitCount(book: book)
+        let maxPos = Double(max(count - 1, 0))
+        let turnDistance = pageTurnDistance(size: size)
+        let direction: Double = (book.bindingDirection == .leftToRight) ? -1 : 1
+
+        let predictedDelta = Double(predictedX / turnDistance) * direction
+        let predicted = dragStartPosition + predictedDelta
+        let target = min(max(predicted.rounded(), 0), maxPos)
+
+        if abs(target - dragStartPosition) > longJumpThreshold {
+            quickJump(to: target, book: book)
+        } else {
+            withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+                position = target
             }
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        }
+    }
+
+    /// 手指点击左右边缘 → 翻一页
+    private func handleEdgeTap(at x: CGFloat, width: CGFloat, book: Book) {
+        guard edgeTapActive, !fastJumpActive else { return }
+
+        if x < width * 0.16 {
+            withAnimation(.spring(response: 0.38, dampingFraction: 0.88)) {
+                position = max(position - 1, 0)
+            }
+        } else if x > width * 0.84 {
+            let maxPos = Double(max(readerUnitCount(book: book) - 1, 0))
+            withAnimation(.spring(response: 0.38, dampingFraction: 0.88)) {
+                position = min(position + 1, maxPos)
+            }
+        }
     }
 
     // MARK: - 位置
@@ -1024,7 +1000,6 @@ struct BookReaderView: View {
         }
     }
 
-    /// 长距离跳页：先切到「白纸 + 页码」的降级画面，瞬间落位，等画面稳了再恢复真实渲染。
     private func quickJump(to target: Double, book: Book) {
         let maxPos = Double(max(readerUnitCount(book: book) - 1, 0))
         let clamped = min(max(target, 0), maxPos)
@@ -1085,8 +1060,6 @@ struct BookReaderView: View {
         .padding(.bottom, 10)
     }
 
-    /// 整本书的进度条：按住横向拖动 = 直接跳到任意位置，一次能从第一页拖到最后一页。
-    /// 拖动中画面降级成白纸 + 页码，中间页面完全不渲染。
     @ViewBuilder
     private func scrubber(book: Book) -> some View {
         let unitCount = max(readerUnitCount(book: book), 1)
@@ -1246,8 +1219,6 @@ struct BookReaderView: View {
                     }
                 }
 
-                // 直接绑 penColor，不再经过 draftColor 中转，
-                // 避免界面重算时颜色被偷偷改掉（笔刷莫名变淡）。
                 ColorPicker("", selection: $penColor, supportsOpacity: false)
                     .labelsHidden()
                     .frame(width: 26, height: 26)
@@ -1545,9 +1516,6 @@ struct BookReaderView: View {
             }
 
             if !pdfURLs.isEmpty {
-                // 必须 @MainActor：下面会写 pdfImportProgress / pdfImportTotal
-                // 这些 @State，还要调 library.update()。
-                // 不在主线程写就会「没反应」——进度条不出现、页面也不跳出来。
                 Task { @MainActor in
                     for pdfURL in pdfURLs {
                         await importPDFPages(url: pdfURL, occupies: occupies)
