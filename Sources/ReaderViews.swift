@@ -9,6 +9,9 @@ struct PageContentView: View {
     let theme: ReaderTheme
 
     var body: some View {
+        // ⚠️ 位移存的是逻辑坐标（页高 = 1000），这里换算成当前屏幕点
+        let k = size.height / DrawingGeometry.logicalPageHeight
+
         ZStack {
             PaperView(theme: theme)
 
@@ -19,8 +22,8 @@ struct PageContentView: View {
                         .scaledToFill()
                         .frame(width: size.width, height: size.height)
                         .scaleEffect(page.transform.scale)
-                        .offset(x: page.transform.offsetX,
-                                y: page.transform.offsetY)
+                        .offset(x: page.transform.offsetX * k,
+                                y: page.transform.offsetY * k)
                 }
             }
         }
@@ -48,7 +51,6 @@ struct SpreadCanvasView: View {
     var body: some View {
         ZStack {
             if let idx = spread.fullSpreadPageIndex, book.pages.indices.contains(idx) {
-                // 「两页一张」：整张图铺满整个跨页
                 PageContentView(page: book.pages[idx],
                                 size: spreadSize,
                                 theme: theme)
@@ -59,7 +61,6 @@ struct SpreadCanvasView: View {
                     slot(pageIndex: sides.left)
                     slot(pageIndex: sides.right)
                 }
-                // 书脊：一条 1pt 细线，无阴影
                 .overlay(SpineLineView(theme: theme))
             }
 
@@ -99,7 +100,6 @@ struct SinglePageView: View {
     let showDrawing: Bool
     let theme: ReaderTheme
 
-    /// 单页模式下要不要显示纸张边缘的描边
     var bordered: Bool = true
 
     var body: some View {
