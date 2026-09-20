@@ -96,11 +96,13 @@ struct StoredImage<Content: View>: View {
 
 struct LibraryView: View {
     @EnvironmentObject private var library: LibraryStore
+    @EnvironmentObject private var settingsStore: AppSettingsStore
 
     @State private var showNewBookAlert = false
     @State private var newBookTitle = ""
     @State private var bookToRename: Book?
     @State private var renameTitle = ""
+    @State private var showSettings = false
 
     private let columns = [GridItem(.adaptive(minimum: 170, maximum: 240), spacing: 24)]
 
@@ -115,6 +117,13 @@ struct LibraryView: View {
             }
             .navigationTitle("我的书架")
             .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button {
+                        showSettings = true
+                    } label: {
+                        Image(systemName: "gearshape")
+                    }
+                }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
                         newBookTitle = ""
@@ -126,6 +135,10 @@ struct LibraryView: View {
             }
             .navigationDestination(for: UUID.self) { id in
                 BookReaderView(bookID: id)
+            }
+            .sheet(isPresented: $showSettings) {
+                SettingsView()
+                    .environmentObject(settingsStore)
             }
             .alert("新建画册", isPresented: $showNewBookAlert) {
                 TextField("画册名称", text: $newBookTitle)
