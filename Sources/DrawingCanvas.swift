@@ -10,7 +10,7 @@ struct DrawingCanvas: UIViewRepresentable {
     var initialOffsetX: CGFloat = 0
     let displaySize: CGSize
 
-    /// 纸张位图（白纸 + 左右页图片）。
+    /// 纸张位图（白纸 + 左右页图片）
     var paperImage: UIImage? = nil
 
     // 上下文
@@ -37,6 +37,14 @@ struct DrawingCanvas: UIViewRepresentable {
     let threeFingerRedo: Bool
     let fourFingerClear: Bool
     let longPressEyedropper: Bool
+
+    // 翻页（手指滑动 / 点边缘）—— 由画布内部接管，
+    // 这样它和外层的双指缩放/平移共用同一条触摸路径，不会互相挡。
+    var pagePanEnabled: Bool = false
+    var pageTapEnabled: Bool = false
+    var onPagePanChanged: (CGFloat) -> Void = { _ in }
+    var onPagePanEnded: (CGFloat, CGFloat) -> Void = { _, _ in }
+    var onPageTap: (CGFloat) -> Void = { _ in }
 
     // 回调
     let onDrawingChanged: (PKDrawing) -> Void
@@ -164,6 +172,33 @@ struct DrawingCanvas: UIViewRepresentable {
         scroll.addGestureRecognizer(twoPan)
         context.coordinator.twoFingerPan = twoPan
 
+        // MARK: 单指拖动 → 翻页（只认手指；最多 1 个触点，和上面的双指互不干扰）
+        let pagePan = UIPanGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handlePagePan(_:))
+        )
+        pagePan.minimumNumberOfTouches = 1
+        pagePan.maximumNumberOfTouches = 1
+        pagePan.delegate = context.coordinator
+        pagePan.cancelsTouchesInView = false
+        pagePan.delaysTouchesBegan = false
+        pagePan.allowedTouchTypes = Self.fingerOnly
+        scroll.addGestureRecognizer(pagePan)
+        context.coordinator.pagePan = pagePan
+
+        // MARK: 单指点击 → 边缘翻页（只认手指）
+        let pageTap = UITapGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handlePageTap(_:))
+        )
+        pageTap.numberOfTapsRequired = 1
+        pageTap.numberOfTouchesRequired = 1
+        pageTap.cancelsTouchesInView = false
+        pageTap.delegate = context.coordinator
+        pageTap.allowedTouchTypes = Self.fingerOnly
+        scroll.addGestureRecognizer(pageTap)
+        context.coordinator.pageTap = pageTap
+
         // MARK: 双指轻点 → 撤销
         let twoTap = UITapGestureRecognizer(
             target: context.coordinator,
@@ -176,6 +211,7 @@ struct DrawingCanvas: UIViewRepresentable {
         twoTap.allowedTouchTypes = Self.fingerOnly
         scroll.addGestureRecognizer(twoTap)
         context.coordinator.twoFingerTap = twoTap
+        pageTap.require(toFail: twoTap)
 
         // MARK: 双指长按 → 连续撤销
         let rapidUndo = UILongPressGestureRecognizer(
@@ -247,6 +283,9 @@ struct DrawingCanvas: UIViewRepresentable {
         context.coordinator.book = book
         context.coordinator.spreadIndex = spreadIndex
         context.coordinator.displaySize = displaySize
+        context.coordinator.onPagePanChanged = onPagePanChanged
+        context.coordinator.onPagePanEnded = onPagePanEnded
+        context.coordinator.onPageTap = onPageTap
 
         if let paper = context.coordinator.paperView {
             if paper.image !== paperImage {
@@ -345,10 +384,13 @@ struct DrawingCanvas: UIViewRepresentable {
         context.coordinator.eyedropperGesture?.isEnabled =
             on && longPressEyedropper && pencilOnly
 
-        // 双指缩放 / 平移始终开启。Apple Pencil 已被 allowedTouchTypes 排除，
-        // 笔不会误触发它们。
+        // 双指缩放 / 平移：始终开启。Apple Pencil 已被 allowedTouchTypes 排除。
         context.coordinator.customPinch?.isEnabled = true
         context.coordinator.twoFingerPan?.isEnabled = true
+
+        // 手指翻页：由 ReaderView 按模式决定开不开
+        context.coordinator.pagePan?.isEnabled = pagePanEnabled
+        context.coordinator.pageTap?.isEnabled = pageTapEnabled
     }
 
     // MARK: - 偏移换算
@@ -386,6 +428,10 @@ struct DrawingCanvas: UIViewRepresentable {
         var onPickColor: (Color) -> Void
         var onZoomChanged: (CGFloat) -> Void
 
+        var onPagePanChanged: (CGFloat) -> Void = { _ in }
+        var onPagePanEnded: (CGFloat, CGFloat) -> Void = { _, _ in }
+        var onPageTap: (CGFloat) -> Void = { _ in }
+
         weak var scroll: UIScrollView?
         weak var canvas: PKCanvasView?
         weak var container: UIView?
@@ -408,6 +454,8 @@ struct DrawingCanvas: UIViewRepresentable {
 
         weak var customPinch: UIPinchGestureRecognizer?
         weak var twoFingerPan: UIPanGestureRecognizer?
+        weak var pagePan: UIPanGestureRecognizer?
+        weak var pageTap: UITapGestureRecognizer?
         weak var twoFingerTap: UITapGestureRecognizer?
         weak var rapidUndoGesture: UILongPressGestureRecognizer?
         weak var threeFingerTap: UITapGestureRecognizer?
@@ -554,6 +602,32 @@ struct DrawingCanvas: UIViewRepresentable {
             canvas.drawingGestureRecognizer.isEnabled = !suspend
         }
 
+        // MARK: 手指翻页
+
+        @objc func handlePagePan(_ g: UIPanGestureRecognizer) {
+            guard let scroll else { return }
+
+            switch g.state {
+            case .changed:
+                onPagePanChanged(g.translation(in: scroll).x)
+
+            case .ended, .cancelled:
+                let dx = g.translation(in: scroll).x
+                let vx = g.velocity(in: scroll).x
+                // UIPanGestureRecognizer 没有 predictedEndTranslation，
+                // 用速度估一下惯性滑行距离（约 0.35 秒的减速）
+                onPagePanEnded(dx, dx + vx * 0.35)
+
+            default:
+                break
+            }
+        }
+
+        @objc func handlePageTap(_ g: UITapGestureRecognizer) {
+            guard let scroll else { return }
+            onPageTap(g.location(in: scroll).x)
+        }
+
         // MARK: 手势优先级
 
         func gestureRecognizer(_ g: UIGestureRecognizer,
@@ -672,116 +746,5 @@ struct DrawingCanvas: UIViewRepresentable {
                 UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
             }
         }
-    }
-}
-
-// MARK: - 只认手指的手势层（书页上的翻页 / 边缘点击）
-
-/// 铺在书页上面的一层透明视图，专门接管「手指」的拖动和点击。
-///
-/// SwiftUI 的 DragGesture / SpatialTapGesture 分不清手指和 Apple Pencil，
-/// Pencil 划过纸边也会被算成翻页拖动。UIKit 的手势可以限制触摸类型，
-/// 所以这里换成 UIKit 手势，并把触摸类型钉死为「手指」。
-///
-/// Apple Pencil 的触摸会从这一层「穿透」下去，落到下面的画布上照常画画。
-struct FingerGestureLayer: UIViewRepresentable {
-    /// 是否接管手指拖动（翻页）
-    var panEnabled: Bool
-    /// 是否接管手指点击（边缘翻页）
-    var tapEnabled: Bool
-
-    /// 拖动中：相对起点的横向位移
-    var onPanChanged: (CGFloat) -> Void
-    /// 松手：实际位移 + 预测落点位移
-    var onPanEnded: (CGFloat, CGFloat) -> Void
-    /// 点击：位置（相对本层）
-    var onTap: (CGPoint) -> Void
-
-    func makeCoordinator() -> Coordinator { Coordinator(self) }
-
-    func makeUIView(context: Context) -> UIView {
-        let view = PencilPassthroughView()
-        view.backgroundColor = .clear
-
-        let pan = UIPanGestureRecognizer(target: context.coordinator,
-                                         action: #selector(Coordinator.handlePan(_:)))
-        pan.allowedTouchTypes = DrawingCanvas.fingerOnly
-        pan.maximumNumberOfTouches = 1
-        pan.cancelsTouchesInView = false
-        pan.delaysTouchesBegan = false
-        pan.delegate = context.coordinator
-        view.addGestureRecognizer(pan)
-
-        let tap = UITapGestureRecognizer(target: context.coordinator,
-                                         action: #selector(Coordinator.handleTap(_:)))
-        tap.allowedTouchTypes = DrawingCanvas.fingerOnly
-        tap.numberOfTapsRequired = 1
-        tap.cancelsTouchesInView = false
-        tap.delegate = context.coordinator
-        view.addGestureRecognizer(tap)
-
-        context.coordinator.pan = pan
-        context.coordinator.tap = tap
-        context.coordinator.host = view
-        return view
-    }
-
-    func updateUIView(_ view: UIView, context: Context) {
-        context.coordinator.parent = self
-        view.isUserInteractionEnabled = (panEnabled || tapEnabled)
-        context.coordinator.pan?.isEnabled = panEnabled
-        context.coordinator.tap?.isEnabled = tapEnabled
-    }
-
-    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
-        var parent: FingerGestureLayer
-        weak var pan: UIPanGestureRecognizer?
-        weak var tap: UITapGestureRecognizer?
-        weak var host: UIView?
-
-        init(_ parent: FingerGestureLayer) { self.parent = parent }
-
-        @objc func handlePan(_ g: UIPanGestureRecognizer) {
-            guard let host else { return }
-
-            switch g.state {
-            case .changed:
-                parent.onPanChanged(g.translation(in: host).x)
-
-            case .ended, .cancelled:
-                let dx = g.translation(in: host).x
-                let vx = g.velocity(in: host).x
-
-                // UIPanGestureRecognizer 没有 predictedEndTranslation
-                // （那是 SwiftUI DragGesture 才有的），
-                // 这里用速度估一下惯性滑行的距离：约 0.35 秒的减速。
-                parent.onPanEnded(dx, dx + vx * 0.35)
-
-            default:
-                break
-            }
-        }
-
-        @objc func handleTap(_ g: UITapGestureRecognizer) {
-            guard let host else { return }
-            parent.onTap(g.location(in: host))
-        }
-
-        func gestureRecognizer(_ g: UIGestureRecognizer,
-                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
-            true
-        }
-    }
-}
-
-/// Apple Pencil 的触摸直接放行（返回 nil → 穿透到下面的画布），
-/// 手指则被这一层接住。这样「笔只画画、手指只做手势」互不干扰。
-final class PencilPassthroughView: UIView {
-    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-        if let touches = event?.allTouches,
-           touches.contains(where: { $0.type == .pencil }) {
-            return nil
-        }
-        return super.hitTest(point, with: event)
     }
 }
