@@ -46,8 +46,7 @@ struct DrawingCanvas: UIViewRepresentable {
     var onZoomChanged: (CGFloat) -> Void = { _ in }
 
     /// 「100%」对应的 zoomScale
-    /// ⚠️ 加了下限 / 上限保护：viewportSize 为 0 或异常时不会算出 0 / NaN / 无穷大，
-    ///    否则 UIScrollView 设 zoomScale 时会直接崩。
+    /// 加了上下限保护：viewportSize 异常时不会算出 0 / NaN / 无穷大
     private var fitScale: CGFloat {
         guard canvasSize.height > 0, viewportSize.height > 0 else { return 1 }
         let raw = viewportSize.height / canvasSize.height
@@ -114,11 +113,18 @@ struct DrawingCanvas: UIViewRepresentable {
 
         applyInitialOffset(scroll, fit: fit, animated: false, in: context.coordinator)
 
-        // 让外层缩放手势优先，不被画布内部手势拖累
-        if let pinch = scroll.pinchGestureRecognizer {
-            pinch.delegate = context.coordinator
-        }
-        scroll.panGestureRecognizer.delegate = context.coordinator
+        // ⚠️⚠️ 这里以前有两行代码，是「点编辑闪退」的元凶，已删除：
+        //
+        //     if let pinch = scroll.pinchGestureRecognizer {
+        //         pinch.delegate = context.coordinator
+        //     }
+        //     scroll.panGestureRecognizer.delegate = context.coordinator
+        //
+        // 原因：UIScrollView 自带的 pinch / pan 手势，delegate 在 UIKit 内部是私有对象。
+        // 被外部替换后，UIKit 依旧会向这个 delegate 发送私有方法，Coordinator 不响应，
+        // 直接抛 unrecognized selector 异常 → SIGABRT 闪退（崩溃日志已证实）。
+        // 这两个手势不需要自定义 delegate 也能正常工作，单指画画与双指手势靠指头数区分，
+        // 本来就不会冲突。
 
         // MARK: 双指轻点 → 撤销
         let twoTap = UITapGestureRecognizer(
@@ -375,13 +381,8 @@ struct DrawingCanvas: UIViewRepresentable {
             reportZoom(scrollView)
         }
 
-        /// ⚠️ 这是「点编辑闪退」的核心修复点。
-        ///
-        /// scrollView 在 makeUIView / updateUIView 里设置 zoomScale 时，会「同步」
-        /// 回调到 scrollViewDidZoom → reportZoom。此时 SwiftUI 正在执行视图更新事务，
-        /// 如果同步把值写回 @State，就会触发 "Modifying state during view update" 崩溃。
-        ///
-        /// 所以：读取数值 → 做保护 → 排队到下一个 runloop 再回传。
+        /// 读取缩放倍率 → 做数值保护 → 排队到下一个 runloop 再回传 SwiftUI。
+        /// 异步派发是为了不在 SwiftUI 的视图更新事务里写 @State。
         private func reportZoom(_ scrollView: UIScrollView) {
             let fit = scrollView.minimumZoomScale
             guard fit > 0, fit.isFinite else { return }
@@ -442,7 +443,7 @@ struct DrawingCanvas: UIViewRepresentable {
         // MARK: PKCanvasView
 
         func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
-            // ⚠️ 同样异步：这个回调可能在 SwiftUI 视图更新事务中被触发
+            // 异步回传：这个回调可能在 SwiftUI 视图更新事务中被触发
             let drawing = canvasView.drawing
             DispatchQueue.main.async { [weak self] in
                 self?.onDrawingChanged(drawing)
@@ -535,7 +536,6 @@ struct DrawingCanvas: UIViewRepresentable {
                                                 displaySize: size,
                                                 drawing: canvas.drawing,
                                                 atNormalized: CGPoint(x: nx, y: ny)) {
-                // 异步回传，避免在手势回调里同步写 @State
                 DispatchQueue.main.async { [weak self] in
                     self?.onPickColor(picked)
                 }
