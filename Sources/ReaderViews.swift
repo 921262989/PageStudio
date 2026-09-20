@@ -6,6 +6,7 @@ import PencilKit
 struct PageContentView: View {
     let page: Page
     let size: CGSize
+    let theme: ReaderTheme    // ← 必须有这一行
 
     var body: some View {
         ZStack {
