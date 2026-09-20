@@ -18,6 +18,7 @@ enum ToolPopover: Identifiable, Equatable {
     }
 }
 
+@MainActor
 struct BookReaderView: View {
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var settingsStore: AppSettingsStore
@@ -83,6 +84,10 @@ struct BookReaderView: View {
     @State private var pdfImportProgress: Double? = nil
     @State private var pdfImportTotal = 0
     @State private var pdfImportDone = 0
+
+    /// 纸张位图缓存（白纸 + 左右页图片渲染成的图），
+    /// 它跟笔迹放在同一个缩放容器里，所以放大时纸和字一起变大。
+    private static let paperCache = NSCache<NSString, UIImage>()
 
     private var book: Book? { library.book(id: bookID) }
     private var settings: AppSettings { settingsStore.settings }
@@ -168,6 +173,8 @@ struct BookReaderView: View {
                           updated.pages.indices.contains(pageIndex) else { return }
                     updated.pages[pageIndex].transform = newTransform
                     library.update(updated)
+                    // 图片范围变了：丢掉旧纸张图，下次进入编辑会重新渲染
+                    Self.paperCache.removeAllObjects()
                 }
             }
         }
@@ -176,6 +183,9 @@ struct BookReaderView: View {
             clampPosition()
         }
         .onChange(of: isPenActive) { active in
+            // 进出编辑模式时丢掉旧的纸张位图，避免图片变化后还显示旧纸
+            Self.paperCache.removeAllObjects()
+
             if active {
                 withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
                     brushBarCollapsed = false
@@ -678,6 +688,38 @@ struct BookReaderView: View {
 
     // MARK: - 绘制画布
 
+    /// 把「白纸 + 左右页图片」渲染成一张位图，作为画布的背景。
+    /// 它会和笔迹放进同一个缩放容器 → 双指放大时纸和字一起变大。
+    private func paperImage(book: Book, spreadIndex: Int,
+                            logical: CGSize) -> UIImage? {
+        let key = "paper-\(book.id.uuidString)-\(spreadIndex)"
+            + "-\(Int(logical.width))x\(Int(logical.height))" as NSString
+
+        if let cached = Self.paperCache.object(forKey: key) {
+            return cached
+        }
+
+        let spreads = SpreadLayout.spreads(for: book)
+        guard spreads.indices.contains(spreadIndex) else { return nil }
+
+        let content = SpreadCanvasView(book: book,
+                                       spread: spreads[spreadIndex],
+                                       pageWidth: logical.width / 2,
+                                       pageHeight: logical.height,
+                                       drawingRevision: 0,
+                                       showDrawing: false,
+                                       theme: theme)
+            .frame(width: logical.width, height: logical.height)
+
+        let renderer = ImageRenderer(content: content)
+        renderer.scale = 1.5
+        renderer.isOpaque = false
+
+        guard let image = renderer.uiImage else { return nil }
+        Self.paperCache.setObject(image, forKey: key)
+        return image
+    }
+
     @ViewBuilder
     private func drawingCanvas(book: Book, unitIndex index: Int,
                                size: ReaderSize, spreadIndex: Int,
@@ -698,6 +740,9 @@ struct BookReaderView: View {
             initialOffsetX: initialOffsetX,
             displaySize: CGSize(width: size.pageWidth * 2,
                                 height: size.pageHeight),
+            paperImage: paperImage(book: book,
+                                   spreadIndex: spreadIndex,
+                                   logical: logical),
             book: book,
             spreadIndex: spreadIndex,
             initialDrawing: layerStore.drawing(bookId: book.id,
@@ -1500,9 +1545,9 @@ struct BookReaderView: View {
             }
 
             if !pdfURLs.isEmpty {
-                // ⚠️ 必须 @MainActor：下面会写 pdfImportProgress / pdfImportTotal
-                //    这些 @State，还要调 library.update()。
-                //    不在主线程写就会「没反应」——进度条不出现、页面也不跳出来。
+                // 必须 @MainActor：下面会写 pdfImportProgress / pdfImportTotal
+                // 这些 @State，还要调 library.update()。
+                // 不在主线程写就会「没反应」——进度条不出现、页面也不跳出来。
                 Task { @MainActor in
                     for pdfURL in pdfURLs {
                         await importPDFPages(url: pdfURL, occupies: occupies)
@@ -1572,6 +1617,7 @@ struct BookReaderView: View {
 
         didAutoAppend = false
         isDraggingPage = false
+        Self.paperCache.removeAllObjects()
 
         if viewMode == .spread {
             position = Double(SpreadLayout.spreadIndex(containingPage: startIndex,
