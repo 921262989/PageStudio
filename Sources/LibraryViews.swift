@@ -1,20 +1,19 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import PencilKit
 
-// MARK: - 书架上的弹窗（合并成一个，避免多 sheet 打架）
+// MARK: - 书架上的弹窗
 
 enum LibrarySheet: Identifiable {
     case settings
-    case cover(Book)
-    case pdf(URL)
     case photoImport
+    case edit(Book)
 
     var id: String {
         switch self {
-        case .settings:        return "settings"
-        case .cover(let b):    return "cover-\(b.id.uuidString)"
-        case .pdf(let url):    return "pdf-\(url.lastPathComponent)"
-        case .photoImport:     return "photoImport"
+        case .settings:     return "settings"
+        case .photoImport:  return "photoImport"
+        case .edit(let b):  return "edit-\(b.id.uuidString)"
         }
     }
 }
@@ -22,17 +21,32 @@ enum LibrarySheet: Identifiable {
 struct LibraryView: View {
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var settingsStore: AppSettingsStore
+    @StateObject private var layerStore = LayerStore()
 
     @State private var path = NavigationPath()
     @State private var showNewBookAlert = false
     @State private var newBookTitle = ""
-    @State private var bookToRename: Book?
-    @State private var renameTitle = ""
     @State private var carouselIndex = 0
 
     @State private var activeSheet: LibrarySheet?
 
-    @State private var showPDFPicker = false
+    /// 上滑出来的那三个按钮
+    @State private var actionBook: Book?
+    @State private var showActionMenu = false
+    @State private var showMoreMenu = false
+
+    /// 加密
+    @State private var lockBook: Book?
+    @State private var lockInput = ""
+    @State private var showLockPrompt = false
+    @State private var setLockBook: Book?
+    @State private var newLockInput = ""
+    @State private var showSetLockPrompt = false
+
+    /// 导出 PDF
+    @State private var exportURL: URL?
+    @State private var showExportShare = false
+    @State private var busyText: String?
 
     private var theme: ReaderTheme { settingsStore.settings.readerTheme }
 
@@ -47,6 +61,10 @@ struct LibraryView: View {
                     } else {
                         shelf
                     }
+                }
+
+                if let busyText {
+                    busyOverlay(busyText)
                 }
             }
             .navigationTitle("我的书架")
@@ -66,12 +84,6 @@ struct LibraryView: View {
                         }
 
                         Divider()
-
-                        Button {
-                            showPDFPicker = true
-                        } label: {
-                            Label("导入 PDF", systemImage: "doc.richtext")
-                        }
 
                         Button {
                             activeSheet = .photoImport
@@ -94,58 +106,96 @@ struct LibraryView: View {
                     carouselIndex = 0
                 }
             }
-            .alert("重命名画册", isPresented: renameAlertBinding) {
-                TextField("画册名称", text: $renameTitle)
-                Button("取消", role: .cancel) { bookToRename = nil }
-                Button("保存") {
-                    if var b = bookToRename {
-                        let trimmed = renameTitle
-                            .trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !trimmed.isEmpty { b.title = trimmed }
-                        library.update(b)
-                    }
-                    bookToRename = nil
+        }
+        // 上滑：三个按钮
+        .confirmationDialog(actionBook?.title ?? "画册",
+                            isPresented: $showActionMenu,
+                            titleVisibility: .visible) {
+            Button("菜单") { showMoreMenu = true }
+            Button("编辑") {
+                if let b = actionBook { activeSheet = .edit(b) }
+            }
+            Button("删除", role: .destructive) {
+                if let b = actionBook { library.delete(b) }
+            }
+            Button("取消", role: .cancel) { }
+        }
+        // 菜单展开
+        .confirmationDialog("菜单",
+                            isPresented: $showMoreMenu,
+                            titleVisibility: .visible) {
+            Button(BookLock.isLocked(actionBook?.id ?? UUID()) ? "关闭密码" : "设置密码") {
+                guard let b = actionBook else { return }
+                if BookLock.isLocked(b.id) {
+                    BookLock.setPassword(nil, for: b.id)
+                } else {
+                    setLockBook = b
+                    newLockInput = ""
+                    showSetLockPrompt = true
                 }
             }
+            Button("复制画册") {
+                if let b = actionBook {
+                    let copy = library.duplicate(b)
+                    if let idx = library.books.firstIndex(where: { $0.id == copy.id }) {
+                        carouselIndex = idx
+                    }
+                }
+            }
+            Button("导出 PDF") {
+                if let b = actionBook { exportPDF(b) }
+            }
+            Button("取消", role: .cancel) { }
         }
-        // 单一 sheet 出口
+        // 设置密码
+        .alert("设置密码", isPresented: $showSetLockPrompt) {
+            SecureField("输入密码", text: $newLockInput)
+            Button("取消", role: .cancel) { }
+            Button("确定") {
+                if let b = setLockBook,
+                   !newLockInput.trimmingCharacters(in: .whitespaces).isEmpty {
+                    BookLock.setPassword(newLockInput, for: b.id)
+                }
+                setLockBook = nil
+                newLockInput = ""
+            }
+        } message: {
+            Text("下次打开这本画册需要输入密码。")
+        }
+        // 打开加密画册
+        .alert("请输入密码", isPresented: $showLockPrompt) {
+            SecureField("密码", text: $lockInput)
+            Button("取消", role: .cancel) {
+                lockBook = nil
+                lockInput = ""
+            }
+            Button("打开") {
+                if let b = lockBook, BookLock.verify(lockInput, for: b.id) {
+                    path.append(b.id)
+                }
+                lockBook = nil
+                lockInput = ""
+            }
+        }
         .sheet(item: $activeSheet) { sheet in
             switch sheet {
             case .settings:
                 SettingsView()
                     .environmentObject(settingsStore)
 
-            case .cover(let book):
-                CoverPickerView(
-                    bookID: book.id,
-                    initialStyle: book.coverStyle,
-                    hasCustomImage: book.customCoverImage != nil,
-                    onStyle: { style in
-                        var updated = book
-                        updated.coverStyle = style
-                        library.update(updated)
-                    },
-                    onCustomImage: { name in
-                        var updated = book
-                        updated.customCoverImage = name
-                        library.update(updated)
-                    }
-                )
-
-            case .pdf(let url):
-                PDFImportSheet(fileURL: url)
-                    .environmentObject(library)
-
             case .photoImport:
                 PhotoImportSheet()
                     .environmentObject(library)
+
+            case .edit(let book):
+                BookEditView(book: book)
+                    .environmentObject(library)
             }
         }
-        // 文件选择器
-        .fileImporter(isPresented: $showPDFPicker,
-                      allowedContentTypes: [.pdf],
-                      allowsMultipleSelection: false) { result in
-            handlePDFSelection(result)
+        .sheet(isPresented: $showExportShare) {
+            if let exportURL {
+                ShareSheet(items: [exportURL])
+            }
         }
         .preferredColorScheme(.dark)
         .onChange(of: library.books.count) { count in
@@ -153,31 +203,24 @@ struct LibraryView: View {
         }
     }
 
-    private var renameAlertBinding: Binding<Bool> {
-        Binding(
-            get: { bookToRename != nil },
-            set: { if !$0 { bookToRename = nil } }
-        )
-    }
-
-    // MARK: - 居中书架
+    // MARK: - 书架
 
     private var shelf: some View {
         VStack(spacing: 0) {
             BookCarousel(books: library.books,
                          index: $carouselIndex,
                          onOpen: { book in
-                             path.append(book.id)
+                             if BookLock.isLocked(book.id) {
+                                 lockBook = book
+                                 lockInput = ""
+                                 showLockPrompt = true
+                             } else {
+                                 path.append(book.id)
+                             }
                          },
-                         onCover: { book in
-                             activeSheet = .cover(book)
-                         },
-                         onRename: { book in
-                             bookToRename = book
-                             renameTitle = book.title
-                         },
-                         onDelete: { book in
-                             library.delete(book)
+                         onSwipeUp: { book in
+                             actionBook = book
+                             showActionMenu = true
                          })
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -190,10 +233,18 @@ struct LibraryView: View {
         if library.books.indices.contains(carouselIndex) {
             let book = library.books[carouselIndex]
             VStack(spacing: 4) {
-                Text(book.title)
-                    .font(.headline)
-                    .lineLimit(1)
-                    .foregroundStyle(.white)
+                HStack(spacing: 6) {
+                    Text(book.title)
+                        .font(.headline)
+                        .lineLimit(1)
+                        .foregroundStyle(.white)
+
+                    if BookLock.isLocked(book.id) {
+                        Image(systemName: "lock.fill")
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.7))
+                    }
+                }
 
                 HStack(spacing: 6) {
                     Text("\(book.pages.count) 页")
@@ -204,9 +255,14 @@ struct LibraryView: View {
                 }
                 .font(.caption)
                 .foregroundStyle(.white.opacity(0.7))
+
+                Text("上滑封面可打开菜单")
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.45))
+                    .padding(.top, 2)
             }
             .padding(.horizontal, 24)
-            .padding(.bottom, 28)
+            .padding(.bottom, 24)
         }
     }
 
@@ -226,48 +282,233 @@ struct LibraryView: View {
             }
             .buttonStyle(.borderedProminent)
 
-            HStack(spacing: 12) {
-                Button("导入 PDF") {
-                    showPDFPicker = true
-                }
-                .buttonStyle(.bordered)
-                .tint(.white)
+            Button("批量导入图片") {
+                activeSheet = .photoImport
+            }
+            .buttonStyle(.bordered)
+            .tint(.white)
+        }
+    }
 
-                Button("批量导入图片") {
-                    activeSheet = .photoImport
+    @ViewBuilder
+    private func busyOverlay(_ text: String) -> some View {
+        ZStack {
+            Color.black.opacity(0.55).ignoresSafeArea()
+            VStack(spacing: 14) {
+                ProgressView()
+                Text(text)
+                    .font(.footnote)
+                    .foregroundStyle(.white)
+            }
+            .padding(26)
+            .background(.ultraThinMaterial,
+                        in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+    }
+
+    // MARK: - 导出 PDF
+
+    private func exportPDF(_ book: Book) {
+        busyText = "正在导出 PDF…"
+
+        DispatchQueue.main.async {
+            let url = PDFExporter.export(book: book,
+                                         layerStore: layerStore,
+                                         theme: theme)
+            busyText = nil
+
+            guard let url else {
+                busyText = nil
+                return
+            }
+            exportURL = url
+            showExportShare = true
+        }
+    }
+}
+
+// MARK: - 分享面板
+
+struct ShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ controller: UIActivityViewController,
+                                context: Context) { }
+}
+
+// MARK: - 编辑画册（名称 / 封面 / 内页样式）
+
+struct BookEditView: View {
+    @EnvironmentObject private var library: LibraryStore
+    @Environment(\.dismiss) private var dismiss
+
+    let book: Book
+
+    @State private var title: String
+    @State private var rule: PageRuleStyle
+    @State private var showCoverPicker = false
+    @State private var draftBook: Book
+
+    init(book: Book) {
+        self.book = book
+        _title = State(initialValue: book.title)
+        _rule = State(initialValue: PageRuleStore.load(for: book.id))
+        _draftBook = State(initialValue: book)
+    }
+
+    private let previewSize = CGSize(width: 150, height: 210)
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("名称") {
+                    TextField("画册名称", text: $title)
+                        .onChange(of: title) { newValue in
+                            draftBook.title = newValue
+                            library.update(draftBook)
+                        }
                 }
-                .buttonStyle(.bordered)
-                .tint(.white)
+
+                Section("封面") {
+                    HStack(spacing: 16) {
+                        NotebookCoverView(book: draftBook, width: 88)
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(draftBook.customCoverImage == nil
+                                 ? draftBook.coverStyle.displayName
+                                 : "自定义图片")
+                                .font(.subheadline)
+                            Button {
+                                showCoverPicker = true
+                            } label: {
+                                Label("更换封面", systemImage: "paintpalette")
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                        Spacer()
+                    }
+                    .padding(.vertical, 4)
+                }
+
+                Section("内页样式") {
+                    Picker("样式", selection: $rule.kind) {
+                        ForEach(PageRuleKind.allCases) { kind in
+                            Label(kind.displayName, systemImage: kind.systemImage)
+                                .tag(kind)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .onChange(of: rule.kind) { _ in saveRule() }
+
+                    if rule.kind != .none {
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text("间距")
+                                Spacer()
+                                Text("\(Int(rule.spacing))")
+                                    .foregroundStyle(.secondary)
+                                    .monospacedDigit()
+                            }
+                            Slider(value: $rule.spacing, in: 12...80, step: 1)
+                                .onChange(of: rule.spacing) { _ in saveRule() }
+                        }
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text("粗细")
+                                Spacer()
+                                Text(String(format: "%.1f", rule.lineWidth))
+                                    .foregroundStyle(.secondary)
+                                    .monospacedDigit()
+                            }
+                            Slider(value: $rule.lineWidth, in: 0.4...4, step: 0.1)
+                                .onChange(of: rule.lineWidth) { _ in saveRule() }
+                        }
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text("浓淡")
+                                Spacer()
+                                Text("\(Int(rule.opacity * 100))%")
+                                    .foregroundStyle(.secondary)
+                                    .monospacedDigit()
+                            }
+                            Slider(value: $rule.opacity, in: 0.08...1.0)
+                                .onChange(of: rule.opacity) { _ in saveRule() }
+                        }
+
+                        HStack {
+                            Text("颜色")
+                            Spacer()
+                            ColorPicker("", selection: colorBinding,
+                                        supportsOpacity: false)
+                                .labelsHidden()
+                        }
+                    }
+                }
+
+                Section("预览") {
+                    HStack {
+                        Spacer()
+                        ZStack {
+                            PaperView(theme: ReaderTheme.default)
+                            if rule.kind != .none {
+                                PageRuleLayer(style: rule, pageSize: previewSize)
+                            }
+                        }
+                        .frame(width: previewSize.width, height: previewSize.height)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(PaperStyle.border, lineWidth: 0.5)
+                        )
+                        Spacer()
+                    }
+                }
+            }
+            .navigationTitle("编辑画册")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("完成") {
+                        library.update(draftBook)
+                        dismiss()
+                    }
+                }
+            }
+            .sheet(isPresented: $showCoverPicker) {
+                CoverPickerView(
+                    bookID: draftBook.id,
+                    initialStyle: draftBook.coverStyle,
+                    hasCustomImage: draftBook.customCoverImage != nil,
+                    onStyle: { style in
+                        draftBook.coverStyle = style
+                        library.update(draftBook)
+                    },
+                    onCustomImage: { name in
+                        draftBook.customCoverImage = name
+                        library.update(draftBook)
+                    }
+                )
             }
         }
     }
 
-    // MARK: - PDF 选择
-
-    private func handlePDFSelection(_ result: Result<[URL], Error>) {
-        switch result {
-        case .failure:
-            break
-
-        case .success(let urls):
-            guard let url = urls.first else { return }
-
-            let accessing = url.startAccessingSecurityScopedResource()
-            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
-
-            let dest = FileStorage.documents.appendingPathComponent("import-temp.pdf")
-            try? FileManager.default.removeItem(at: dest)
-
-            let target: URL
-            if (try? FileManager.default.copyItem(at: url, to: dest)) != nil {
-                target = dest
-            } else {
-                target = url
+    private var colorBinding: Binding<Color> {
+        Binding(
+            get: { rule.color },
+            set: { newValue in
+                rule.colorHex = newValue.hexString
+                saveRule()
             }
+        )
+    }
 
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                activeSheet = .pdf(target)
-            }
-        }
+    private func saveRule() {
+        PageRuleStore.save(rule, for: book.id)
     }
 }
