@@ -1,7 +1,8 @@
 import SwiftUI
 import PencilKit
 
-/// 笔的类型
+// MARK: - 笔类型 / 颜色 / 粗细
+
 enum PenKind: String, CaseIterable {
     case pen
     case marker
@@ -27,14 +28,8 @@ enum PenKind: String, CaseIterable {
     }
 }
 
-/// 笔的颜色
 enum PenColor: String, CaseIterable {
-    case black
-    case red
-    case blue
-    case green
-    case orange
-    case purple
+    case black, red, blue, green, orange, purple
 
     var color: Color {
         switch self {
@@ -48,13 +43,11 @@ enum PenColor: String, CaseIterable {
     }
 }
 
-/// 笔的粗细
 enum PenWidth: Double, CaseIterable {
     case thin = 2
     case medium = 6
     case thick = 14
 
-    /// 工具栏小圆点的视觉尺寸
     var dotSize: CGFloat {
         switch self {
         case .thin:   return 6
@@ -64,24 +57,28 @@ enum PenWidth: Double, CaseIterable {
     }
 }
 
+// MARK: - 画布
+
 /// PencilKit 画布的 SwiftUI 封装。
 ///
-/// ⚠️ 核心设计：传入的 `canvasSize` 永远是 **跨页尺寸**（宽 = 单页宽 × 2）。
-/// 单页模式下由外层裁剪显示其中一半，笔迹坐标在两种模式下完全一致。
+/// ⚠️ `canvasSize` 永远传「逻辑跨页尺寸」（DrawingGeometry.spreadSize），
+/// 与屏幕大小无关。显示时由外层 scaleEffect 缩放。
 struct DrawingCanvas: UIViewRepresentable {
 
     let canvasSize: CGSize
     let initialDrawing: PKDrawing
     let pencilOnly: Bool
     let tool: PKTool
-    /// 每次自增都会让画布执行一次撤销
     let undoTrigger: Int
     let redoTrigger: Int
     let clearTrigger: Int
     let onDrawingChanged: (PKDrawing) -> Void
+    /// 正在落笔 / 抬笔 —— 用来避免烘焙图和实时画布重影
+    let onDrawingStateChanged: (Bool) -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onDrawingChanged: onDrawingChanged)
+        Coordinator(onDrawingChanged: onDrawingChanged,
+                    onDrawingStateChanged: onDrawingStateChanged)
     }
 
     func makeUIView(context: Context) -> PKCanvasView {
@@ -95,7 +92,6 @@ struct DrawingCanvas: UIViewRepresentable {
         canvas.tool = tool
         canvas.drawingPolicy = pencilOnly ? .pencilOnly : .anyInput
 
-        // 画布自身不滚动、不缩放 —— 视图缩放由外层负责
         canvas.isScrollEnabled = false
         canvas.minimumZoomScale = 1
         canvas.maximumZoomScale = 1
@@ -108,26 +104,23 @@ struct DrawingCanvas: UIViewRepresentable {
 
     func updateUIView(_ canvas: PKCanvasView, context: Context) {
         context.coordinator.onDrawingChanged = onDrawingChanged
+        context.coordinator.onDrawingStateChanged = onDrawingStateChanged
 
-        // 尺寸变了（比如横竖屏切换）就更新
         if canvas.bounds.size != canvasSize {
             canvas.frame = CGRect(origin: .zero, size: canvasSize)
             canvas.bounds = CGRect(origin: .zero, size: canvasSize)
         }
 
-        // 笔模式
         let policy: PKCanvasViewDrawingPolicy = pencilOnly ? .pencilOnly : .anyInput
         if canvas.drawingPolicy != policy {
             canvas.drawingPolicy = policy
         }
 
-        // 工具
         if context.coordinator.lastToolSignature != toolSignature {
             canvas.tool = tool
             context.coordinator.lastToolSignature = toolSignature
         }
 
-        // 撤销 / 重做 / 清除
         if context.coordinator.lastUndoTrigger != undoTrigger {
             context.coordinator.lastUndoTrigger = undoTrigger
             canvas.undoManager?.undo()
@@ -144,22 +137,33 @@ struct DrawingCanvas: UIViewRepresentable {
     }
 
     private var toolSignature: String {
-        "\(pencilOnly)-\(String(describing: type(of: tool)))-\(tool)"
+        "\(pencilOnly)-\(tool)"
     }
 
     final class Coordinator: NSObject, PKCanvasViewDelegate {
         var onDrawingChanged: (PKDrawing) -> Void
+        var onDrawingStateChanged: (Bool) -> Void
         var lastToolSignature: String = ""
         var lastUndoTrigger: Int = 0
         var lastRedoTrigger: Int = 0
         var lastClearTrigger: Int = 0
 
-        init(onDrawingChanged: @escaping (PKDrawing) -> Void) {
+        init(onDrawingChanged: @escaping (PKDrawing) -> Void,
+             onDrawingStateChanged: @escaping (Bool) -> Void) {
             self.onDrawingChanged = onDrawingChanged
+            self.onDrawingStateChanged = onDrawingStateChanged
         }
 
         func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
             onDrawingChanged(canvasView.drawing)
+        }
+
+        func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
+            onDrawingStateChanged(true)
+        }
+
+        func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
+            onDrawingStateChanged(false)
         }
     }
 }
