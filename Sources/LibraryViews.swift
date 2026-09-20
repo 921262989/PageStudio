@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct LibraryView: View {
     @EnvironmentObject private var library: LibraryStore
@@ -12,6 +13,10 @@ struct LibraryView: View {
     @State private var showSettings = false
     @State private var coverEditingBook: Book?
     @State private var carouselIndex = 0
+
+    // PDF 导入
+    @State private var showPDFPicker = false
+    @State private var pdfFileRef: PDFFileRef?
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -30,9 +35,18 @@ struct LibraryView: View {
                     }
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button {
-                        newBookTitle = ""
-                        showNewBookAlert = true
+                    Menu {
+                        Button {
+                            newBookTitle = ""
+                            showNewBookAlert = true
+                        } label: {
+                            Label("新建空白画册", systemImage: "book")
+                        }
+                        Button {
+                            showPDFPicker = true
+                        } label: {
+                            Label("导入 PDF", systemImage: "doc.richtext")
+                        }
                     } label: {
                         Image(systemName: "plus")
                     }
@@ -60,6 +74,15 @@ struct LibraryView: View {
                         library.update(updated)
                     }
                 )
+            }
+            .sheet(item: $pdfFileRef) { ref in
+                PDFImportSheet(fileURL: ref.url)
+                    .environmentObject(library)
+            }
+            .fileImporter(isPresented: $showPDFPicker,
+                          allowedContentTypes: [.pdf],
+                          allowsMultipleSelection: false) { result in
+                handlePDFSelection(result)
             }
             .alert("新建画册", isPresented: $showNewBookAlert) {
                 TextField("画册名称", text: $newBookTitle)
@@ -151,11 +174,42 @@ struct LibraryView: View {
                 .foregroundStyle(.secondary)
             Text("书架还是空的")
                 .font(.title3)
+
             Button("新建第一本画册") {
                 newBookTitle = ""
                 showNewBookAlert = true
             }
             .buttonStyle(.borderedProminent)
+
+            Button("导入一本 PDF") {
+                showPDFPicker = true
+            }
+            .buttonStyle(.bordered)
+        }
+    }
+
+    // MARK: - PDF 选择
+
+    private func handlePDFSelection(_ result: Result<[URL], Error>) {
+        switch result {
+        case .failure:
+            break
+
+        case .success(let urls):
+            guard let url = urls.first else { return }
+
+            let accessing = url.startAccessingSecurityScopedResource()
+            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+
+            // 拷进沙盒。文件选择器给的是临时授权，异步渲染时可能已失效。
+            let dest = FileStorage.documents.appendingPathComponent("import-temp.pdf")
+            try? FileManager.default.removeItem(at: dest)
+
+            if (try? FileManager.default.copyItem(at: url, to: dest)) != nil {
+                pdfFileRef = PDFFileRef(url: dest)
+            } else {
+                pdfFileRef = PDFFileRef(url: url)
+            }
         }
     }
 }
