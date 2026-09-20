@@ -2,9 +2,27 @@ import Foundation
 import UIKit
 import ImageIO
 
+// MARK: - 绘制几何
+
+/// 笔迹的「逻辑坐标系」。
+/// ⚠️ 页高固定 1000 点，与屏幕尺寸完全无关。
+/// 这样转屏、切单页/双页，笔迹坐标都不会漂移。
+enum DrawingGeometry {
+    static let logicalPageHeight: CGFloat = 1000
+
+    static func logicalPageWidth(ratio: Double) -> CGFloat {
+        let r = max(ratio, 0.4)
+        return logicalPageHeight / CGFloat(r)
+    }
+
+    static func spreadSize(ratio: Double) -> CGSize {
+        CGSize(width: logicalPageWidth(ratio: ratio) * 2,
+               height: logicalPageHeight)
+    }
+}
+
 // MARK: - 文件目录
 
-/// 统一管理沙盒里的文件目录。所有数据都在本机，全程无网络请求。
 enum FileStorage {
 
     static var documents: URL {
@@ -23,14 +41,12 @@ enum FileStorage {
         ensure(documents.appendingPathComponent("Thumbnails", isDirectory: true))
     }
 
-    /// 笔迹目录：Drawings/<bookId>/<spreadIndex>.drawing
     static var drawingsDirectory: URL {
         ensure(documents.appendingPathComponent("Drawings", isDirectory: true))
     }
 
-    /// 导出临时目录
-    static var exportDirectory: URL {
-        ensure(documents.appendingPathComponent("Exports", isDirectory: true))
+    static var coversDirectory: URL {
+        ensure(documents.appendingPathComponent("Covers", isDirectory: true))
     }
 
     @discardableResult
@@ -58,6 +74,22 @@ enum FileStorage {
         try? FileManager.default.removeItem(at: imageURL(named: name))
     }
 
+    // MARK: 封面
+
+    static func coverURL(named name: String) -> URL {
+        coversDirectory.appendingPathComponent(name)
+    }
+
+    static func saveCoverData(_ data: Data, preferredExtension ext: String) throws -> String {
+        let name = UUID().uuidString + "." + ext
+        try data.write(to: coverURL(named: name), options: .atomic)
+        return name
+    }
+
+    static func deleteCover(named name: String) {
+        try? FileManager.default.removeItem(at: coverURL(named: name))
+    }
+
     // MARK: 笔迹
 
     static func bookDrawingsDirectory(bookId: UUID) -> URL {
@@ -79,12 +111,11 @@ enum FileStorage {
 
 // MARK: - 图片加载
 
-/// 图片解码 + 内存缓存。用「降采样」避免大图撑爆内存。
 enum ImageLoader {
 
     static let cache: NSCache<NSString, UIImage> = {
         let c = NSCache<NSString, UIImage>()
-        c.countLimit = 24
+        c.countLimit = 32
         return c
     }()
 
