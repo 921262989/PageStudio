@@ -1,4 +1,5 @@
 import SwiftUI
+import PencilKit
 
 // MARK: - 设置存储
 
@@ -57,12 +58,16 @@ final class LibraryStore: ObservableObject {
     }
 
     func delete(_ book: Book) {
+        // 清理图片文件
         for page in book.pages {
             if let name = page.imageFileName {
                 FileStorage.deleteImage(named: name)
                 ImageLoader.cache.removeObject(forKey: name as NSString)
             }
         }
+        // 清理笔迹目录
+        FileStorage.deleteDrawings(bookId: book.id)
+
         books.removeAll { $0.id == book.id }
         save()
     }
@@ -84,5 +89,73 @@ final class LibraryStore: ObservableObject {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         guard let data = try? encoder.encode(books) else { return }
         try? data.write(to: FileStorage.libraryFile, options: .atomic)
+    }
+}
+
+// MARK: - 笔迹存储
+
+/// 笔迹以「跨页」为单位落盘。
+/// 内存里缓存已加载的 PKDrawing；写盘延迟 0.5 秒合并，防止强退丢数据的同时避免频繁 IO。
+final class DrawingStore: ObservableObject {
+
+    private var cache: [String: PKDrawing] = [:]
+    private var pendingSaves: [String: DispatchWorkItem] = [:]
+
+    private func cacheKey(bookId: UUID, spreadIndex: Int) -> String {
+        "\(bookId.uuidString)_\(spreadIndex)"
+    }
+
+    /// 读取某跨页的笔迹。没有就返回空画布。
+    func load(bookId: UUID, spreadIndex: Int) -> PKDrawing {
+        let key = cacheKey(bookId: bookId, spreadIndex: spreadIndex)
+        if let cached = cache[key] { return cached }
+
+        let url = FileStorage.drawingURL(bookId: bookId, spreadIndex: spreadIndex)
+        let drawing: PKDrawing
+        if let data = try? Data(contentsOf: url),
+           let loaded = try? PKDrawing(data: data) {
+            drawing = loaded
+        } else {
+            drawing = PKDrawing()
+        }
+        cache[key] = drawing
+        return drawing
+    }
+
+    /// 保存笔迹。内存立即更新，写盘延迟 0.5 秒。
+    func save(_ drawing: PKDrawing, bookId: UUID, spreadIndex: Int) {
+        let key = cacheKey(bookId: bookId, spreadIndex: spreadIndex)
+        cache[key] = drawing
+
+        pendingSaves[key]?.cancel()
+
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            let url = FileStorage.drawingURL(bookId: bookId, spreadIndex: spreadIndex)
+            let data = drawing.dataRepresentation()
+            try? data.write(to: url, options: .atomic)
+            self.pendingSaves[key] = nil
+        }
+        pendingSaves[key] = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+    }
+
+    /// 立即把所有待写盘的内容落盘（比如 App 退到后台时）
+    func flushAll(bookId: UUID) {
+        for (key, work) in pendingSaves where key.hasPrefix(bookId.uuidString) {
+            work.cancel()
+            work.perform()
+        }
+    }
+
+    /// 清空某跨页的笔迹
+    func clear(bookId: UUID, spreadIndex: Int) {
+        let key = cacheKey(bookId: bookId, spreadIndex: spreadIndex)
+        cache[key] = PKDrawing()
+        pendingSaves[key]?.cancel()
+        pendingSaves[key] = nil
+
+        let url = FileStorage.drawingURL(bookId: bookId, spreadIndex: spreadIndex)
+        try? FileManager.default.removeItem(at: url)
     }
 }
