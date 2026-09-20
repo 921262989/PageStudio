@@ -8,7 +8,7 @@ struct SettingsView: View {
         NavigationStack {
             Form {
                 Section {
-                    Toggle("仅 Apple Pencil 可绘制", isOn: pencilOnlyBinding)
+                    Toggle("仅 Apple Pencil 可绘制", isOn: binding(\.pencilOnlyDrawMode))
                     Text(settingsStore.settings.pencilOnlyDrawMode
                          ? "手指用于翻页与手势，不会产生笔迹。"
                          : "手指与 Apple Pencil 都可绘制。翻页请用左右边缘点击。")
@@ -19,7 +19,7 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    Toggle("自动续页", isOn: autoAppendBinding)
+                    Toggle("自动续页", isOn: binding(\.autoAppendPage))
                     Text("在最后一页落笔后自动追加空白页。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
@@ -28,23 +28,10 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    Toggle("点击左右边缘翻页", isOn: edgeTapBinding)
-                    Toggle("翻页后保持缩放", isOn: zoomPersistBinding)
+                    Toggle("点击左右边缘翻页", isOn: binding(\.edgeTapTurn))
+                    Toggle("翻页后保持缩放", isOn: binding(\.zoomPersistOnTurn))
                 } header: {
                     Text("操作")
-                }
-
-                Section {
-                    LabeledContent("默认浏览模式") {
-                        Picker("", selection: defaultModeBinding) {
-                            Text("单页").tag(ViewMode.single)
-                            Text("双页").tag(ViewMode.spread)
-                        }
-                        .pickerStyle(.segmented)
-                        .frame(width: 160)
-                    }
-                } header: {
-                    Text("显示")
                 }
 
                 Section {
@@ -64,40 +51,10 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Bindings
-
-    private var pencilOnlyBinding: Binding<Bool> {
+    private func binding(_ key: WritableKeyPath<AppSettings, Bool>) -> Binding<Bool> {
         Binding(
-            get: { settingsStore.settings.pencilOnlyDrawMode },
-            set: { settingsStore.settings.pencilOnlyDrawMode = $0 }
-        )
-    }
-
-    private var autoAppendBinding: Binding<Bool> {
-        Binding(
-            get: { settingsStore.settings.autoAppendPage },
-            set: { settingsStore.settings.autoAppendPage = $0 }
-        )
-    }
-
-    private var edgeTapBinding: Binding<Bool> {
-        Binding(
-            get: { settingsStore.settings.edgeTapTurn },
-            set: { settingsStore.settings.edgeTapTurn = $0 }
-        )
-    }
-
-    private var zoomPersistBinding: Binding<Bool> {
-        Binding(
-            get: { settingsStore.settings.zoomPersistOnTurn },
-            set: { settingsStore.settings.zoomPersistOnTurn = $0 }
-        )
-    }
-
-    private var defaultModeBinding: Binding<ViewMode> {
-        Binding(
-            get: { settingsStore.settings.pencilOnlyDrawMode ? .spread : .spread },
-            set: { _ in }
+            get: { settingsStore.settings[keyPath: key] },
+            set: { settingsStore.settings[keyPath: key] = $0 }
         )
     }
 }
