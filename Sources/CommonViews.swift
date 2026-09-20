@@ -3,18 +3,20 @@ import PencilKit
 
 // MARK: - 纸张
 
+/// 纸张永远是米白色，不随主题变化。
+/// 保留 `theme` 参数只是为了兼容已有调用点，内部不使用。
 struct PaperView: View {
-    let theme: ReaderTheme
+    var theme: ReaderTheme? = nil
 
     var body: some View {
         ZStack {
-            theme.paperColor
+            PaperStyle.fill
 
             LinearGradient(
-                colors: [theme.paperEdgeShadow,
+                colors: [PaperStyle.edgeShadow,
                          Color.clear,
                          Color.clear,
-                         theme.paperEdgeShadow],
+                         PaperStyle.edgeShadow],
                 startPoint: .leading,
                 endPoint: .trailing
             )
@@ -25,20 +27,19 @@ struct PaperView: View {
 
 // MARK: - 书脊细线
 
-/// 书脊处的一条细线。不投影、不加宽 —— 只为提示装订位置。
 struct SpineLineView: View {
-    let theme: ReaderTheme
+    var theme: ReaderTheme? = nil
 
     var body: some View {
         Rectangle()
-            .fill(theme.spineLineColor)
+            .fill(PaperStyle.spineLine)
             .frame(width: 1)
             .frame(maxHeight: .infinity)
             .allowsHitTesting(false)
     }
 }
 
-// MARK: - 阅读区背景
+// MARK: - 阅读区背景（这个才随主题变）
 
 struct ReaderBackground: View {
     let theme: ReaderTheme
@@ -99,8 +100,6 @@ struct StoredImage<Content: View>: View {
 
 // MARK: - 跨页笔迹的烘焙图
 
-/// 把某一跨页的笔迹渲染成一张透明叠图。
-///
 /// ⚠️ 只在「这一页不处于编辑状态」时使用。
 /// 编辑中的页如果同时显示烘焙图，会和画布上的实时笔迹重叠，
 /// 表现为「颜色变深、笔画变粗、几秒后变样」。
@@ -109,7 +108,6 @@ struct SpreadDrawingImage: View {
     let spreadIndex: Int
     let size: CGSize
     let revision: Int
-    /// 渲染倍率。2 能明显减少缩放后的锯齿与视觉变粗。
     var renderScale: CGFloat = 2
 
     @State private var image: UIImage?
