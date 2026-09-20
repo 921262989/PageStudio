@@ -104,8 +104,11 @@ enum PDFExporter {
                                                  spreadIndex: spread.index,
                                                  layerID: meta.id)
                 guard !drawing.strokes.isEmpty else { continue }
-                guard let ink = drawing.image(from: CGRect(origin: .zero, size: logical),
-                                              scale: scale) else { continue }
+
+                // ⚠️ PKDrawing.image(from:scale:) 返回的是非可选 UIImage，
+                //    不能写 guard let，直接取用即可。
+                let ink = drawing.image(from: CGRect(origin: .zero, size: logical),
+                                        scale: scale)
 
                 ctx.cgContext.saveGState()
                 ctx.cgContext.setAlpha(CGFloat(min(max(meta.opacity, 0), 1)))
