@@ -31,13 +31,14 @@ struct BookReaderView: View {
     @State private var zoomResetTrigger = 0
     @State private var showEraserPanel = false
 
+    /// 每一页翻页动画时长
     private let flipStepDuration: Double = 0.20
-    /// 每滑动这么多点，就翻一页
+    /// 每滑动这么多点，翻一页
     private let swipeStepPoints: CGFloat = 90
     /// 一次滑动最多翻多少页
     private let maxFlipPerSwipe = 25
 
-    // 翻页动画
+    // 翻页状态
     @State private var flipProgress: CGFloat = 0
     @State private var isFlipping = false
     @State private var flipForward = true
@@ -205,7 +206,7 @@ struct BookReaderView: View {
 
     @ViewBuilder
     private func stableScene(book: Book, size: ReaderSize, index: Int) -> some View {
-        // ⚠️ 编辑中的那一页，不显示烘焙笔迹 —— 否则会和画布上的实时笔迹重叠，
+        // ⚠️ 编辑中的那一页不显示烘焙笔迹，否则会和画布上的实时笔迹重叠，
         //    表现为「颜色变深、笔画变粗、几秒后变样」
         let showBakedInk = !(isPenActive && index == unitIndex)
 
@@ -293,8 +294,10 @@ struct BookReaderView: View {
                 }
 
                 if forward {
-                    FlipCard(front: pageOrPaper(book: book, index: fromSides.right, size: size),
-                             back: pageOrPaper(book: book, index: toSides.left, size: size),
+                    FlipCard(front: pageOrPaper(book: book, index: fromSides.right,
+                                                size: size),
+                             back: pageOrPaper(book: book, index: toSides.left,
+                                               size: size),
                              angle: -Double(flipProgress) * 180,
                              anchor: .leading,
                              perspective: 0.32,
@@ -304,8 +307,10 @@ struct BookReaderView: View {
                         .frame(width: pw, height: ph)
                         .position(x: pw * 1.5, y: ph / 2)
                 } else {
-                    FlipCard(front: pageOrPaper(book: book, index: fromSides.left, size: size),
-                             back: pageOrPaper(book: book, index: toSides.right, size: size),
+                    FlipCard(front: pageOrPaper(book: book, index: fromSides.left,
+                                                size: size),
+                             back: pageOrPaper(book: book, index: toSides.right,
+                                               size: size),
                              angle: Double(flipProgress) * 180,
                              anchor: .trailing,
                              perspective: 0.32,
@@ -447,9 +452,7 @@ struct BookReaderView: View {
                 drawingStore.save(newDrawing, bookId: book.id, spreadIndex: sIndex)
                 handleAutoAppend(book: book, spreadIndex: sIndex, drawing: newDrawing)
             },
-            onDrawingStateChanged: { _ in
-                // 目前不需要额外处理；保留回调以便将来扩展
-            }
+            onDrawingStateChanged: { _ in }
         )
         .frame(width: logical.width, height: logical.height)
         .scaleEffect(scale, anchor: .topLeading)
@@ -470,12 +473,19 @@ struct BookReaderView: View {
             let ui = UIColor(penColor).withAlphaComponent(kind.alpha)
             let width = penWidth.value * kind.widthMultiplier
             return PKInkingTool(kind.inkType, color: ui, width: width)
+
         case .eraser:
-            return PKEraserTool(eraserKind.pkType, width: eraserWidth.value)
+            // ⚠️ 带宽度的构造函数是 iOS 16.4 才有的。
+            //    低版本退回系统默认大小，不会崩。
+            if #available(iOS 16.4, *) {
+                return PKEraserTool(eraserKind.pkType, width: eraserWidth.value)
+            } else {
+                return PKEraserTool(eraserKind.pkType)
+            }
         }
     }
 
-    /// ⚠️ 必须是稳定字符串。工具签名一变，画布就会重设工具，
+    /// ⚠️ 必须是稳定字符串。签名一变画布就会重设工具，
     ///    在落笔过程中重设会打断笔迹渲染。
     private var toolSignature: String {
         switch activeTool {
@@ -540,7 +550,6 @@ struct BookReaderView: View {
                     return
                 }
 
-                // 没翻过、或者只是快速轻扫 —— 按预测位移补上
                 let predicted = abs(value.predictedEndTranslation.width)
                 let predictedSteps = Int(predicted / swipeStepPoints)
                 let extra = max(0, predictedSteps - dragStepsApplied)
@@ -558,7 +567,6 @@ struct BookReaderView: View {
                         stepFlip(book: book)
                     }
                 } else if dragStepsApplied == 0 && pendingFlips == 0 {
-                    // 极轻的一次滑动：至少翻一页
                     flipForward = shouldTurnForward(dx: value.translation.width)
                     pendingFlips = 1
                     stepFlip(book: book)
@@ -754,28 +762,23 @@ struct BookReaderView: View {
     private var penToolbar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 10) {
-                // 三种笔
                 ForEach(PenKind.allCases) { kind in
                     toolButton(isActive: activeTool == .brush(kind),
-                               systemImage: kind.systemImage,
-                               label: kind.displayName) {
+                               systemImage: kind.systemImage) {
                         activeTool = .brush(kind)
                     }
                 }
 
                 Divider().frame(height: 20)
 
-                // 橡皮：点开弹窗
                 toolButton(isActive: activeTool.isEraser,
-                           systemImage: eraserKind.systemImage,
-                           label: "橡皮") {
+                           systemImage: eraserKind.systemImage) {
                     activeTool = .eraser
                     showEraserPanel = true
                 }
 
                 Divider().frame(height: 20)
 
-                // 预设颜色
                 ForEach(PenColorPreset.allCases) { preset in
                     Circle()
                         .fill(preset.color)
@@ -790,7 +793,6 @@ struct BookReaderView: View {
                         .onTapGesture { penColor = preset.color }
                 }
 
-                // 自定义颜色
                 ColorPicker("", selection: $customColor, supportsOpacity: false)
                     .labelsHidden()
                     .frame(width: 26, height: 26)
@@ -800,7 +802,6 @@ struct BookReaderView: View {
 
                 Divider().frame(height: 20)
 
-                // 粗细（6 档）
                 ForEach(PenWidth.allCases) { w in
                     Button {
                         penWidth = w
@@ -819,19 +820,16 @@ struct BookReaderView: View {
 
                 Divider().frame(height: 20)
 
-                // 撤销 / 重做 / 清空 / 缩放复位
                 toolButton(isActive: false,
-                           systemImage: "arrow.uturn.backward",
-                           label: "撤销") { undoTrigger += 1 }
+                           systemImage: "arrow.uturn.backward") { undoTrigger += 1 }
                 toolButton(isActive: false,
-                           systemImage: "arrow.uturn.forward",
-                           label: "重做") { redoTrigger += 1 }
+                           systemImage: "arrow.uturn.forward") { redoTrigger += 1 }
                 toolButton(isActive: false,
-                           systemImage: "trash",
-                           label: "清空") { clearTrigger += 1 }
+                           systemImage: "trash") { clearTrigger += 1 }
                 toolButton(isActive: false,
-                           systemImage: "arrow.up.left.and.arrow.down.right",
-                           label: "100%") { zoomResetTrigger += 1 }
+                           systemImage: "arrow.up.left.and.arrow.down.right") {
+                    zoomResetTrigger += 1
+                }
             }
             .padding(.vertical, 8)
             .padding(.horizontal, 14)
@@ -844,7 +842,6 @@ struct BookReaderView: View {
     @ViewBuilder
     private func toolButton(isActive: Bool,
                             systemImage: String,
-                            label: String,
                             action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: systemImage)
