@@ -12,11 +12,11 @@ enum LibrarySheet: Identifiable {
 
     var id: String {
         switch self {
-        case .settings:        return "settings"
-        case .cover(let b):    return "cover-\(b.id.uuidString)"
+        case .settings:         return "settings"
+        case .cover(let b):     return "cover-\(b.id.uuidString)"
         case .pageStyle(let b): return "style-\(b.id.uuidString)"
-        case .pdf(let url):    return "pdf-\(url.lastPathComponent)"
-        case .photoImport:     return "photoImport"
+        case .pdf(let url):     return "pdf-\(url.lastPathComponent)"
+        case .photoImport:      return "photoImport"
         }
     }
 }
@@ -24,6 +24,9 @@ enum LibrarySheet: Identifiable {
 struct LibraryView: View {
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var settingsStore: AppSettingsStore
+
+    /// 导出 PDF 时要读图层笔迹
+    @StateObject private var layerStore = LayerStore()
 
     @State private var path = NavigationPath()
     @State private var showNewBookAlert = false
@@ -35,6 +38,11 @@ struct LibraryView: View {
     @State private var activeSheet: LibrarySheet?
 
     @State private var showPDFPicker = false
+
+    // 导出
+    @State private var busyText: String?
+    @State private var exportURL: URL?
+    @State private var showExportShare = false
 
     private var theme: ReaderTheme { settingsStore.settings.readerTheme }
 
@@ -49,6 +57,10 @@ struct LibraryView: View {
                     } else {
                         shelf
                     }
+                }
+
+                if let busyText {
+                    busyOverlay(busyText)
                 }
             }
             .navigationTitle("我的书架")
@@ -145,6 +157,12 @@ struct LibraryView: View {
                     .environmentObject(library)
             }
         }
+        // 导出完成后弹分享面板
+        .sheet(isPresented: $showExportShare) {
+            if let exportURL {
+                ShareSheet(items: [exportURL])
+            }
+        }
         .fileImporter(isPresented: $showPDFPicker,
                       allowedContentTypes: [.pdf],
                       allowsMultipleSelection: false) { result in
@@ -182,6 +200,9 @@ struct LibraryView: View {
                          onPageStyle: { book in
                              activeSheet = .pageStyle(book)
                          },
+                         onExportPDF: { book in
+                             exportPDF(book)
+                         },
                          onDelete: { book in
                              library.delete(book)
                          })
@@ -210,9 +231,14 @@ struct LibraryView: View {
                 }
                 .font(.caption)
                 .foregroundStyle(.white.opacity(0.7))
+
+                Text("长按封面可更换封面 / 内页样式 / 导出 PDF")
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.45))
+                    .padding(.top, 2)
             }
             .padding(.horizontal, 24)
-            .padding(.bottom, 28)
+            .padding(.bottom, 24)
         }
     }
 
@@ -245,6 +271,43 @@ struct LibraryView: View {
                 .buttonStyle(.bordered)
                 .tint(.white)
             }
+        }
+    }
+
+    @ViewBuilder
+    private func busyOverlay(_ text: String) -> some View {
+        ZStack {
+            Color.black.opacity(0.55).ignoresSafeArea()
+
+            VStack(spacing: 14) {
+                ProgressView()
+                Text(text)
+                    .font(.footnote)
+                    .foregroundStyle(.white)
+            }
+            .padding(26)
+            .background(.ultraThinMaterial,
+                        in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+    }
+
+    // MARK: - 导出 PDF
+
+    private func exportPDF(_ book: Book) {
+        guard book.pages.contains(where: { $0.kind == .image || $0.imageFileName != nil })
+                || !book.pages.isEmpty else { return }
+
+        busyText = "正在导出 PDF…"
+
+        DispatchQueue.main.async {
+            let url = PDFExporter.export(book: book,
+                                         layerStore: layerStore,
+                                         theme: theme)
+            busyText = nil
+
+            guard let url else { return }
+            exportURL = url
+            showExportShare = true
         }
     }
 
