@@ -6,7 +6,7 @@ import PencilKit
 
 // MARK: - 工具弹窗
 
-enum ToolPopover: Identifiable {
+enum ToolPopover: Identifiable, Equatable {
     case brush(PenKind)
     case eraser
 
