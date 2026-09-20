@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import PencilKit
 
 // MARK: - 笔迹位图共享缓存
@@ -17,7 +18,7 @@ final class InkImageCache {
         cache.countLimit = 48
         cache.totalCostLimit = 96 * 1024 * 1024
 
-        NotificationCenter.default.addObserver(
+        _ = NotificationCenter.default.addObserver(
             forName: UIApplication.didReceiveMemoryWarningNotification,
             object: nil,
             queue: .main
@@ -199,13 +200,24 @@ struct InkImageView: View {
         return min(max(raw, 0.75), 2.5)
     }
 
+    /// 缓存键。
+    /// PKDrawing 是值类型（struct），不能用 ObjectIdentifier，
+    /// 所以这里用「笔画数 + 总锚点数 + 包围盒 + 渲染尺寸」拼一个内容指纹。
+    /// 同一个跨页在同一内容下翻来翻去，就能命中同一个位图。
     private var cacheKey: String {
         let logical = DrawingGeometry.spreadSize(ratio: 1.414)
         let scale = effectiveScale
-        // ObjectIdentifier 指向同一个 PKDrawing 实例时稳定，
-        // 同一跨页在同一版本下翻来翻去就能命中缓存。
-        let instance = ObjectIdentifier(drawing).hashValue
-        return "ink-\(instance)-\(Int(logical.width))x\(Int(logical.height))-\(Int(scale * 100))"
+        let b = drawing.bounds
+        let strokeCount = drawing.strokes.count
+        let anchorCount = drawing.strokes.reduce(0) { $0 + $1.path.count }
+
+        let fx = Int(b.origin.x * 100)
+        let fy = Int(b.origin.y * 100)
+        let fw = Int(b.width * 100)
+        let fh = Int(b.height * 100)
+
+        return "ink-\(strokeCount)-\(anchorCount)-\(fx)-\(fy)-\(fw)-\(fh)"
+            + "-\(Int(logical.width))x\(Int(logical.height))-\(Int(scale * 100))"
     }
 
     private func render(key: String) async {
