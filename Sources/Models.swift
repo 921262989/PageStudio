@@ -62,6 +62,17 @@ struct Page: Identifiable, Codable, Hashable {
     }
 }
 
+// MARK: - 大纲条目
+
+struct OutlineItem: Identifiable, Codable, Hashable {
+    var id: UUID = UUID()
+    var title: String = "新条目"
+    /// 0 = 一级，1 = 二级
+    var level: Int = 0
+    /// 跳转目标页（从 0 计数）
+    var pageIndex: Int = 0
+}
+
 // MARK: - 画册
 
 struct Book: Identifiable, Codable, Hashable {
@@ -72,6 +83,12 @@ struct Book: Identifiable, Codable, Hashable {
     /// 单页的高 / 宽。A5 ≈ 1.414
     var pageAspectRatio: Double = 1.414
     var coverPageAlone: Bool = false
+    /// 纯色封面配色
+    var coverStyle: CoverStyle = .indigo
+    /// 自定义封面图片文件名
+    var customCoverImage: String? = nil
+    /// 目录大纲
+    var outline: [OutlineItem] = []
     var createdAt: Date = Date()
     var updatedAt: Date = Date()
 
@@ -79,8 +96,32 @@ struct Book: Identifiable, Codable, Hashable {
     /// 跨页配对由算法实时算出，绝不单独落库。
     var pages: [Page] = []
 
-    var coverImageFileName: String? {
-        pages.first(where: { $0.imageFileName != nil })?.imageFileName
+    init() {}
+
+    // 手写解码：老数据缺字段也能读出来，不会因为升级而丢书
+    enum CodingKeys: String, CodingKey {
+        case id, title, bindingDirection, defaultViewMode, pageAspectRatio
+        case coverPageAlone, coverStyle, customCoverImage, outline
+        case createdAt, updatedAt, pages
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        title = try c.decodeIfPresent(String.self, forKey: .title) ?? "未命名画册"
+        bindingDirection = try c.decodeIfPresent(BindingDirection.self,
+                                                 forKey: .bindingDirection) ?? .leftToRight
+        defaultViewMode = try c.decodeIfPresent(ViewMode.self,
+                                                forKey: .defaultViewMode) ?? .spread
+        pageAspectRatio = try c.decodeIfPresent(Double.self,
+                                                forKey: .pageAspectRatio) ?? 1.414
+        coverPageAlone = try c.decodeIfPresent(Bool.self, forKey: .coverPageAlone) ?? false
+        coverStyle = try c.decodeIfPresent(CoverStyle.self, forKey: .coverStyle) ?? .indigo
+        customCoverImage = try c.decodeIfPresent(String.self, forKey: .customCoverImage)
+        outline = try c.decodeIfPresent([OutlineItem].self, forKey: .outline) ?? []
+        createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
+        pages = try c.decodeIfPresent([Page].self, forKey: .pages) ?? []
     }
 }
 
@@ -102,14 +143,12 @@ struct Spread: Identifiable, Hashable {
 
 enum SpreadLayout {
 
-    /// 把线性页面列表切成跨页序列
     static func spreads(for book: Book) -> [Spread] {
         let pages = book.pages
         var result: [Spread] = []
         var cursor = 0
         var index = 0
 
-        // 1) 首页单独作封面
         if book.coverPageAlone, !pages.isEmpty {
             if pages[0].occupiesSpread {
                 result.append(Spread(index: 0,
@@ -126,10 +165,8 @@ enum SpreadLayout {
             index = 1
         }
 
-        // 2) 两两配对
         while cursor < pages.count {
             if pages[cursor].occupiesSpread {
-                // 占满跨页的图：独占一个跨页
                 result.append(Spread(index: index,
                                      leftPageIndex: nil,
                                      rightPageIndex: nil,
@@ -160,9 +197,12 @@ enum SpreadLayout {
         return result
     }
 
-    /// 给定页码，找出它属于哪个跨页
     static func spreadIndex(containingPage pageIndex: Int, in book: Book) -> Int {
         spreads(for: book).first(where: { $0.pageIndices.contains(pageIndex) })?.index ?? 0
+    }
+
+    static func spread(containingPage pageIndex: Int, in book: Book) -> Spread? {
+        spreads(for: book).first(where: { $0.pageIndices.contains(pageIndex) })
     }
 
     /// 按翻页方向决定左右两个槽位各放哪一页
@@ -180,12 +220,10 @@ enum SpreadLayout {
 // MARK: - 设置
 
 struct AppSettings: Codable, Equatable {
-    /// true = 仅 Apple Pencil 可绘制；false = 手指 + Pencil 都可绘制
     var pencilOnlyDrawMode: Bool = true
     var autoAppendPage: Bool = true
     var edgeTapTurn: Bool = true
     var zoomPersistOnTurn: Bool = true
     var pageTurnSound: Bool = false
-    /// 双指「平移 vs 缩放」判定阈值
     var pinchThreshold: Double = 0.15
 }
