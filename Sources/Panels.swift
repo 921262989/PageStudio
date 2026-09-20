@@ -47,8 +47,8 @@ struct PageThumbnailView: View {
                 }
             }
             .clipped()
-            .background(theme.paperColor)
-            .overlay(Rectangle().stroke(theme.paperBorderColor, lineWidth: 0.5))
+            .background(PaperStyle.fill)
+            .overlay(Rectangle().stroke(PaperStyle.border, lineWidth: 0.5))
             .task(id: "\(book.id.uuidString)-\(spreadIndex)") {
                 await loadInk()
             }
@@ -318,19 +318,16 @@ struct ThumbnailPanelView: View {
 
         var updated = working
 
-        // 1. 删掉这些页独占的图片文件
         for idx in indices where updated.pages.indices.contains(idx) {
             if let name = updated.pages[idx].imageFileName {
                 FileStorage.deleteImage(named: name)
             }
         }
 
-        // 2. 从线性列表里移除
         updated.pages = updated.pages.enumerated()
             .filter { !selection.contains($0.offset) }
             .map { $0.element }
 
-        // 3. 修正大纲里指向已删除区域的条目
         updated.outline = updated.outline.map { item in
             var it = item
             let removedBefore = indices.filter { $0 < item.pageIndex }.count
@@ -339,7 +336,6 @@ struct ThumbnailPanelView: View {
             return it
         }
 
-        // 4. 不能一本书一页都没有
         if updated.pages.isEmpty {
             updated.pages = [Page.blank()]
         }
