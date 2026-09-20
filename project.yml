@@ -26,8 +26,7 @@ targets:
         TARGETED_DEVICE_FAMILY: "2"
 
         # 桌面图标下面显示的名字 —— 想改就改这一行（中文也行）
-        INFOPLIST_KEY_CFBundleDisplayName: 我的画册
-
+        INFOPLIST_KEY_CFBundleDisplayName: PAPER.
         # 应用图标：指向 Assets.xcassets 里的 AppIcon 图集
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: ""
