@@ -1,7 +1,7 @@
 import SwiftUI
 import PencilKit
 
-// MARK: - 设置存储
+// MARK: - 设置
 
 final class AppSettingsStore: ObservableObject {
     private static let storageKey = "AppSettings.v1"
@@ -25,16 +25,14 @@ final class AppSettingsStore: ObservableObject {
     }
 }
 
-// MARK: - 书架数据源
+// MARK: - 书架
 
 @MainActor
 final class LibraryStore: ObservableObject {
 
     @Published private(set) var books: [Book] = []
 
-    init() {
-        load()
-    }
+    init() { load() }
 
     func book(id: UUID) -> Book? {
         books.first { $0.id == id }
@@ -42,7 +40,10 @@ final class LibraryStore: ObservableObject {
 
     @discardableResult
     func createBook(title: String) -> Book {
-        var book = Book(title: title.isEmpty ? "未命名画册" : title)
+        var book = Book()
+        book.title = title.isEmpty ? "未命名画册" : title
+        // 随机发一个纯色封面
+        book.coverStyle = CoverStyle.allCases.randomElement() ?? .indigo
         book.pages = [Page.blank(), Page.blank()]
         books.insert(book, at: 0)
         save()
@@ -58,16 +59,13 @@ final class LibraryStore: ObservableObject {
     }
 
     func delete(_ book: Book) {
-        // 清理图片文件
         for page in book.pages {
             if let name = page.imageFileName {
                 FileStorage.deleteImage(named: name)
                 ImageLoader.cache.removeObject(forKey: name as NSString)
             }
         }
-        // 清理笔迹目录
         FileStorage.deleteDrawings(bookId: book.id)
-
         books.removeAll { $0.id == book.id }
         save()
     }
@@ -92,11 +90,14 @@ final class LibraryStore: ObservableObject {
     }
 }
 
-// MARK: - 笔迹存储
+// MARK: - 笔迹
 
 /// 笔迹以「跨页」为单位落盘。
-/// 内存里缓存已加载的 PKDrawing；写盘延迟 0.5 秒合并，防止强退丢数据的同时避免频繁 IO。
+/// 内存里缓存；写盘延迟 0.4 秒合并，防强退丢数据又避免频繁 IO。
+/// `revision` 在写盘后自增，用来通知界面「这个跨页的笔迹变了，重新烘焙」。
 final class DrawingStore: ObservableObject {
+
+    @Published private(set) var revision: Int = 0
 
     private var cache: [String: PKDrawing] = [:]
     private var pendingSaves: [String: DispatchWorkItem] = [:]
@@ -105,7 +106,6 @@ final class DrawingStore: ObservableObject {
         "\(bookId.uuidString)_\(spreadIndex)"
     }
 
-    /// 读取某跨页的笔迹。没有就返回空画布。
     func load(bookId: UUID, spreadIndex: Int) -> PKDrawing {
         let key = cacheKey(bookId: bookId, spreadIndex: spreadIndex)
         if let cached = cache[key] { return cached }
@@ -122,7 +122,6 @@ final class DrawingStore: ObservableObject {
         return drawing
     }
 
-    /// 保存笔迹。内存立即更新，写盘延迟 0.5 秒。
     func save(_ drawing: PKDrawing, bookId: UUID, spreadIndex: Int) {
         let key = cacheKey(bookId: bookId, spreadIndex: spreadIndex)
         cache[key] = drawing
@@ -132,23 +131,14 @@ final class DrawingStore: ObservableObject {
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             let url = FileStorage.drawingURL(bookId: bookId, spreadIndex: spreadIndex)
-            let data = drawing.dataRepresentation()
-            try? data.write(to: url, options: .atomic)
+            try? drawing.dataRepresentation().write(to: url, options: .atomic)
             self.pendingSaves[key] = nil
+            self.revision &+= 1
         }
         pendingSaves[key] = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
     }
 
-    /// 立即把所有待写盘的内容落盘（比如 App 退到后台时）
-    func flushAll(bookId: UUID) {
-        for (key, work) in pendingSaves where key.hasPrefix(bookId.uuidString) {
-            work.cancel()
-            work.perform()
-        }
-    }
-
-    /// 清空某跨页的笔迹
     func clear(bookId: UUID, spreadIndex: Int) {
         let key = cacheKey(bookId: bookId, spreadIndex: spreadIndex)
         cache[key] = PKDrawing()
@@ -157,5 +147,6 @@ final class DrawingStore: ObservableObject {
 
         let url = FileStorage.drawingURL(bookId: bookId, spreadIndex: spreadIndex)
         try? FileManager.default.removeItem(at: url)
+        revision &+= 1
     }
 }
