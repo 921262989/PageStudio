@@ -1,5 +1,6 @@
 import SwiftUI
 import PencilKit
+import UIKit
 
 // MARK: - 笔的种类
 
@@ -34,15 +35,8 @@ enum PenKind: String, CaseIterable, Identifiable, Codable {
         }
     }
 
-    /// 荧光笔需要透明叠加，其余不透明
-    var alpha: CGFloat {
-        self == .marker ? 0.45 : 1.0
-    }
-
-    /// 荧光笔的勾线宽度需要放大，否则太细
-    var widthMultiplier: CGFloat {
-        self == .marker ? 2.4 : 1.0
-    }
+    var alpha: CGFloat { self == .marker ? 0.45 : 1.0 }
+    var widthMultiplier: CGFloat { self == .marker ? 2.4 : 1.0 }
 }
 
 // MARK: - 当前工具
@@ -60,9 +54,7 @@ enum ActiveTool: Hashable {
 // MARK: - 橡皮种类
 
 enum EraserKind: String, CaseIterable, Identifiable, Codable {
-    /// 精确橡皮：只擦掉笔尖划过的位置（一根笔画可能被擦成两段）
     case precise
-    /// 矢量橡皮：碰到哪一笔，整笔消失
     case vector
 
     var id: String { rawValue }
@@ -99,12 +91,7 @@ enum EraserKind: String, CaseIterable, Identifiable, Codable {
 // MARK: - 笔的粗细（6 档）
 
 enum PenWidth: String, CaseIterable, Identifiable, Codable {
-    case hairline
-    case thin
-    case light
-    case medium
-    case bold
-    case heavy
+    case hairline, thin, light, medium, bold, heavy
 
     var id: String { rawValue }
 
@@ -130,14 +117,13 @@ enum PenWidth: String, CaseIterable, Identifiable, Codable {
         }
     }
 
-    /// 工具栏小圆点的视觉大小
     var dotSize: CGFloat {
         switch self {
-        case .hairline: return 4
-        case .thin:     return 7
-        case .light:    return 10
-        case .medium:   return 14
-        case .bold:     return 19
+        case .hairline: return 5
+        case .thin:     return 8
+        case .light:    return 11
+        case .medium:   return 15
+        case .bold:     return 20
         case .heavy:    return 24
         }
     }
@@ -146,10 +132,7 @@ enum PenWidth: String, CaseIterable, Identifiable, Codable {
 // MARK: - 橡皮的粗细（4 档）
 
 enum EraserWidth: String, CaseIterable, Identifiable, Codable {
-    case small
-    case medium
-    case large
-    case huge
+    case small, medium, large, huge
 
     var id: String { rawValue }
 
@@ -181,75 +164,91 @@ enum EraserWidth: String, CaseIterable, Identifiable, Codable {
     }
 }
 
-// MARK: - 预设颜色
+// MARK: - 预设颜色（精简到 6 个）
 
 enum PenColorPreset: String, CaseIterable, Identifiable {
     case black
-    case graphite
-    case gray
     case red
-    case orange
-    case yellow
-    case green
-    case teal
     case blue
-    case indigo
-    case purple
-    case pink
-    case brown
+    case green
+    case yellow
     case white
 
     var id: String { rawValue }
 
     var displayName: String {
         switch self {
-        case .black:    return "黑"
-        case .graphite: return "石墨"
-        case .gray:     return "灰"
-        case .red:      return "红"
-        case .orange:   return "橙"
-        case .yellow:   return "黄"
-        case .green:    return "绿"
-        case .teal:     return "青"
-        case .blue:     return "蓝"
-        case .indigo:   return "靛"
-        case .purple:   return "紫"
-        case .pink:     return "粉"
-        case .brown:    return "棕"
-        case .white:    return "白"
+        case .black:  return "黑"
+        case .red:    return "红"
+        case .blue:   return "蓝"
+        case .green:  return "绿"
+        case .yellow: return "黄"
+        case .white:  return "白"
         }
     }
 
     var color: Color {
         switch self {
-        case .black:    return Color(white: 0.05)
-        case .graphite: return Color(white: 0.25)
-        case .gray:     return Color(white: 0.55)
-        case .red:      return Color(red: 0.88, green: 0.16, blue: 0.16)
-        case .orange:   return Color(red: 0.96, green: 0.52, blue: 0.10)
-        case .yellow:   return Color(red: 0.97, green: 0.80, blue: 0.10)
-        case .green:    return Color(red: 0.13, green: 0.66, blue: 0.33)
-        case .teal:     return Color(red: 0.10, green: 0.66, blue: 0.66)
-        case .blue:     return Color(red: 0.12, green: 0.40, blue: 0.90)
-        case .indigo:   return Color(red: 0.30, green: 0.24, blue: 0.78)
-        case .purple:   return Color(red: 0.60, green: 0.26, blue: 0.85)
-        case .pink:     return Color(red: 0.94, green: 0.38, blue: 0.62)
-        case .brown:    return Color(red: 0.55, green: 0.38, blue: 0.24)
-        case .white:    return Color(white: 0.97)
+        case .black:  return Color(white: 0.06)
+        case .red:    return Color(red: 0.86, green: 0.16, blue: 0.16)
+        case .blue:   return Color(red: 0.12, green: 0.36, blue: 0.88)
+        case .green:  return Color(red: 0.13, green: 0.62, blue: 0.30)
+        case .yellow: return Color(red: 0.96, green: 0.75, blue: 0.08)
+        case .white:  return Color(white: 0.97)
+        }
+    }
+
+    var hex: String {
+        switch self {
+        case .black:  return "#0F0F0F"
+        case .red:    return "#DB2929"
+        case .blue:   return "#1F5CE0"
+        case .green:  return "#219E4D"
+        case .yellow: return "#F5BF14"
+        case .white:  return "#F7F7F7"
         }
     }
 }
 
-// MARK: - 颜色稳定性
+// MARK: - 用户自定义颜色（可固定到笔刷栏）
 
-/// 把颜色转成一个稳定的字符串。用于判断"工具是否真的变了"。
-/// ⚠️ 不能用 Color 的 description —— 它不稳定，会导致画布工具被反复重设，
-/// 而反复重设工具正是笔迹"画上去一个样、几秒后另一个样"的元凶之一。
-func stableColorKey(_ color: Color) -> String {
-    let ui = UIColor(color)
-    var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-    if ui.getRed(&r, green: &g, blue: &b, alpha: &a) {
-        return String(format: "%.3f_%.3f_%.3f_%.3f", r, g, b, a)
+struct SavedBrushColor: Identifiable, Codable, Hashable {
+    var id: UUID = UUID()
+    var hex: String
+
+    var color: Color {
+        Color(hex: hex) ?? Color(white: 0.06)
     }
-    return "unknown"
+}
+
+// MARK: - Color ←→ HEX
+
+extension Color {
+    init?(hex: String) {
+        var s = hex.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.hasPrefix("#") { s.removeFirst() }
+        guard s.count == 6, let value = UInt32(s, radix: 16) else { return nil }
+        let r = Double((value >> 16) & 0xFF) / 255.0
+        let g = Double((value >> 8) & 0xFF) / 255.0
+        let b = Double(value & 0xFF) / 255.0
+        self = Color(red: r, green: g, blue: b)
+    }
+
+    var hexString: String {
+        let ui = UIColor(self)
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        guard ui.getRed(&r, green: &g, blue: &b, alpha: &a) else { return "#0F0F0F" }
+        let ri = Int((r * 255).rounded())
+        let gi = Int((g * 255).rounded())
+        let bi = Int((b * 255).rounded())
+        return String(format: "#%02X%02X%02X", ri, gi, bi)
+    }
+}
+
+// MARK: - 工具签名（必须稳定）
+
+/// ⚠️ 不能用 Color 的 description —— 它不稳定。
+/// 画布工具被反复重设，正是笔迹「画上去一个样、几秒后另一个样」的元凶之一。
+func stableColorKey(_ color: Color) -> String {
+    color.hexString
 }
