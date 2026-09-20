@@ -1,6 +1,24 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+// MARK: - 书架上的弹窗（合并成一个，避免多 sheet 打架）
+
+enum LibrarySheet: Identifiable {
+    case settings
+    case cover(Book)
+    case pdf(URL)
+    case photoImport
+
+    var id: String {
+        switch self {
+        case .settings:        return "settings"
+        case .cover(let b):    return "cover-\(b.id.uuidString)"
+        case .pdf(let url):    return "pdf-\(url.lastPathComponent)"
+        case .photoImport:     return "photoImport"
+        }
+    }
+}
+
 struct LibraryView: View {
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var settingsStore: AppSettingsStore
@@ -10,36 +28,33 @@ struct LibraryView: View {
     @State private var newBookTitle = ""
     @State private var bookToRename: Book?
     @State private var renameTitle = ""
-    @State private var showSettings = false
-    @State private var coverEditingBook: Book?
     @State private var carouselIndex = 0
 
-    // PDF 导入
+    /// ⚠️ 只保留这一个 sheet。多个 .sheet 挂在同一视图上，
+    ///    iOS 16 只会让最后一个生效 —— 这正是 PDF 导入点了没反应的原因。
+    @State private var activeSheet: LibrarySheet?
+
     @State private var showPDFPicker = false
-    @State private var pdfFileRef: PDFFileRef?
 
-    // 图片批量导入
-    @State private var showPhotoImport = false
-
-    // 翻开动画
-    @State private var openingBook: Book?
-    @State private var openProgress: CGFloat = 0
-    @State private var overlayOpacity: Double = 1
-    @State private var isOpening = false
+    private var theme: ReaderTheme { settingsStore.settings.readerTheme }
 
     var body: some View {
         NavigationStack(path: $path) {
-            Group {
-                if library.books.isEmpty {
-                    emptyState
-                } else {
-                    shelf
+            ZStack {
+                ReaderBackground(theme: theme)
+
+                Group {
+                    if library.books.isEmpty {
+                        emptyState
+                    } else {
+                        shelf
+                    }
                 }
             }
             .navigationTitle("我的书架")
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Button { showSettings = true } label: {
+                    Button { activeSheet = .settings } label: {
                         Image(systemName: "gearshape")
                     }
                 }
@@ -55,13 +70,13 @@ struct LibraryView: View {
                         Divider()
 
                         Button {
-                            delayed { showPDFPicker = true }
+                            showPDFPicker = true
                         } label: {
                             Label("导入 PDF", systemImage: "doc.richtext")
                         }
 
                         Button {
-                            delayed { showPhotoImport = true }
+                            activeSheet = .photoImport
                         } label: {
                             Label("批量导入图片", systemImage: "photo.stack")
                         }
@@ -73,76 +88,71 @@ struct LibraryView: View {
             .navigationDestination(for: UUID.self) { id in
                 BookReaderView(bookID: id)
             }
-        }
-        .overlay {
-            if let openingBook {
-                BookOpeningOverlay(book: openingBook, progress: openProgress)
-                    .opacity(overlayOpacity)
-                    .allowsHitTesting(false)
+            .alert("新建画册", isPresented: $showNewBookAlert) {
+                TextField("画册名称", text: $newBookTitle)
+                Button("取消", role: .cancel) {}
+                Button("创建") {
+                    library.createBook(title: newBookTitle)
+                    carouselIndex = 0
+                }
+            }
+            .alert("重命名画册", isPresented: renameAlertBinding) {
+                TextField("画册名称", text: $renameTitle)
+                Button("取消", role: .cancel) { bookToRename = nil }
+                Button("保存") {
+                    if var b = bookToRename {
+                        let trimmed = renameTitle
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !trimmed.isEmpty { b.title = trimmed }
+                        library.update(b)
+                    }
+                    bookToRename = nil
+                }
             }
         }
-        // ⚠️ 呈现类修饰符挂在 NavigationStack 最外层
+        // 单一 sheet 出口
+        .sheet(item: $activeSheet) { sheet in
+            switch sheet {
+            case .settings:
+                SettingsView()
+                    .environmentObject(settingsStore)
+
+            case .cover(let book):
+                CoverPickerView(
+                    initialStyle: book.coverStyle,
+                    hasCustomImage: book.customCoverImage != nil,
+                    onStyle: { style in
+                        var updated = book
+                        updated.coverStyle = style
+                        library.update(updated)
+                    },
+                    onCustomImage: { name in
+                        var updated = book
+                        updated.customCoverImage = name
+                        library.update(updated)
+                    }
+                )
+
+            case .pdf(let url):
+                PDFImportSheet(fileURL: url)
+                    .environmentObject(library)
+
+            case .photoImport:
+                PhotoImportSheet()
+                    .environmentObject(library)
+            }
+        }
+        // 文件选择器
         .fileImporter(isPresented: $showPDFPicker,
                       allowedContentTypes: [.pdf],
                       allowsMultipleSelection: false) { result in
             handlePDFSelection(result)
         }
-        .sheet(isPresented: $showSettings) {
-            SettingsView()
-                .environmentObject(settingsStore)
-        }
-        .sheet(item: $coverEditingBook) { book in
-            CoverPickerView(
-                initialStyle: book.coverStyle,
-                hasCustomImage: book.customCoverImage != nil,
-                onStyle: { style in
-                    var updated = book
-                    updated.coverStyle = style
-                    library.update(updated)
-                },
-                onCustomImage: { name in
-                    var updated = book
-                    updated.customCoverImage = name
-                    library.update(updated)
-                }
-            )
-        }
-        .sheet(item: $pdfFileRef) { ref in
-            PDFImportSheet(fileURL: ref.url)
-                .environmentObject(library)
-        }
-        .sheet(isPresented: $showPhotoImport) {
-            PhotoImportSheet()
-                .environmentObject(library)
-        }
-        .alert("新建画册", isPresented: $showNewBookAlert) {
-            TextField("画册名称", text: $newBookTitle)
-            Button("取消", role: .cancel) {}
-            Button("创建") {
-                library.createBook(title: newBookTitle)
-                carouselIndex = 0
-            }
-        }
-        .alert("重命名画册", isPresented: renameAlertBinding) {
-            TextField("画册名称", text: $renameTitle)
-            Button("取消", role: .cancel) { bookToRename = nil }
-            Button("保存") {
-                if var b = bookToRename {
-                    let trimmed = renameTitle
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !trimmed.isEmpty { b.title = trimmed }
-                    library.update(b)
-                }
-                bookToRename = nil
-            }
-        }
+        // 深色背景上保证文字可读
+        .preferredColorScheme(.dark)
         .onChange(of: library.books.count) { count in
             carouselIndex = min(max(carouselIndex, 0), max(count - 1, 0))
         }
-    }
-
-    private func delayed(_ action: @escaping () -> Void) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: action)
     }
 
     private var renameAlertBinding: Binding<Bool> {
@@ -159,10 +169,11 @@ struct LibraryView: View {
             BookCarousel(books: library.books,
                          index: $carouselIndex,
                          onOpen: { book in
-                             openBook(book)
+                             // 去掉翻开动画，直接进书
+                             path.append(book.id)
                          },
                          onCover: { book in
-                             coverEditingBook = book
+                             activeSheet = .cover(book)
                          },
                          onRename: { book in
                              bookToRename = book
@@ -185,6 +196,7 @@ struct LibraryView: View {
                 Text(book.title)
                     .font(.headline)
                     .lineLimit(1)
+                    .foregroundStyle(.white)
 
                 HStack(spacing: 6) {
                     Text("\(book.pages.count) 页")
@@ -194,7 +206,7 @@ struct LibraryView: View {
                     }
                 }
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.white.opacity(0.7))
             }
             .padding(.horizontal, 24)
             .padding(.bottom, 28)
@@ -205,9 +217,11 @@ struct LibraryView: View {
         VStack(spacing: 18) {
             Image(systemName: "books.vertical")
                 .font(.system(size: 56))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.white.opacity(0.5))
+
             Text("书架还是空的")
                 .font(.title3)
+                .foregroundStyle(.white)
 
             Button("新建第一本画册") {
                 newBookTitle = ""
@@ -217,49 +231,17 @@ struct LibraryView: View {
 
             HStack(spacing: 12) {
                 Button("导入 PDF") {
-                    delayed { showPDFPicker = true }
+                    showPDFPicker = true
                 }
                 .buttonStyle(.bordered)
+                .tint(.white)
 
                 Button("批量导入图片") {
-                    delayed { showPhotoImport = true }
+                    activeSheet = .photoImport
                 }
                 .buttonStyle(.bordered)
+                .tint(.white)
             }
-        }
-    }
-
-    // MARK: - 翻开动画
-
-    private func openBook(_ book: Book) {
-        guard !isOpening else { return }
-        isOpening = true
-
-        openingBook = book
-        openProgress = 0
-        overlayOpacity = 1
-
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-
-        // 封面绕左边缘翻开
-        withAnimation(.easeInOut(duration: 0.78)) {
-            openProgress = 1
-        }
-
-        // 翻开到 92% 时推入阅读器
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.72) {
-            path.append(book.id)
-            withAnimation(.easeOut(duration: 0.20)) {
-                overlayOpacity = 0
-            }
-        }
-
-        // 收尾
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            openingBook = nil
-            openProgress = 0
-            overlayOpacity = 1
-            isOpening = false
         }
     }
 
@@ -276,6 +258,7 @@ struct LibraryView: View {
             let accessing = url.startAccessingSecurityScopedResource()
             defer { if accessing { url.stopAccessingSecurityScopedResource() } }
 
+            // 拷进沙盒，异步渲染时授权还在
             let dest = FileStorage.documents.appendingPathComponent("import-temp.pdf")
             try? FileManager.default.removeItem(at: dest)
 
@@ -286,73 +269,10 @@ struct LibraryView: View {
                 target = url
             }
 
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                pdfFileRef = PDFFileRef(url: target)
+            // 等文件选择器收完再弹导入界面
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                activeSheet = .pdf(target)
             }
         }
-    }
-}
-
-// MARK: - 翻开动画视图
-
-struct BookOpeningOverlay: View {
-    let book: Book
-    let progress: CGFloat
-
-    var body: some View {
-        GeometryReader { geo in
-            let w = min(geo.size.width * 0.62, 520)
-            let h = w * 1.38
-
-            ZStack {
-                // 压暗背景
-                Color.black
-                    .opacity(0.55 * Double(min(progress * 1.4, 1)))
-                    .ignoresSafeArea()
-
-                ZStack {
-                    // 里面露出的第一页
-                    firstPage(width: w, height: h)
-
-                    // 封面绕左边缘翻开
-                    FlipCard(front: AnyView(NotebookCoverView(book: book, width: w)),
-                             back: AnyView(backSide(width: w, height: h)),
-                             angle: -178 * Double(progress),
-                             anchor: .leading,
-                             perspective: 0.30,
-                             dimming: 0.08,
-                             paperColor: PaperStyle.fill,
-                             borderColor: PaperStyle.border)
-                        .frame(width: w, height: h)
-                }
-                .scaleEffect(1 + 0.07 * progress)
-                .offset(y: -24 * progress)
-                .shadow(color: .black.opacity(0.5), radius: 30, y: 14)
-            }
-            .frame(width: geo.size.width, height: geo.size.height)
-        }
-    }
-
-    private func firstPage(width: CGFloat, height: CGFloat) -> some View {
-        let page = book.pages.first ?? Page.blank()
-        return PageContentView(page: page,
-                               size: CGSize(width: width, height: height),
-                               theme: .classic)
-            .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
-    }
-
-    private func backSide(width: CGFloat, height: CGFloat) -> some View {
-        ZStack {
-            PaperStyle.fill
-
-            LinearGradient(
-                colors: [Color.black.opacity(0.06),
-                         Color.clear,
-                         Color.black.opacity(0.06)],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-        }
-        .frame(width: width, height: height)
     }
 }
