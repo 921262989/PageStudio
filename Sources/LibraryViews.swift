@@ -30,8 +30,6 @@ struct LibraryView: View {
     @State private var renameTitle = ""
     @State private var carouselIndex = 0
 
-    /// ⚠️ 只保留这一个 sheet。多个 .sheet 挂在同一视图上，
-    ///    iOS 16 只会让最后一个生效 —— 这正是 PDF 导入点了没反应的原因。
     @State private var activeSheet: LibrarySheet?
 
     @State private var showPDFPicker = false
@@ -119,6 +117,7 @@ struct LibraryView: View {
 
             case .cover(let book):
                 CoverPickerView(
+                    bookID: book.id,
                     initialStyle: book.coverStyle,
                     hasCustomImage: book.customCoverImage != nil,
                     onStyle: { style in
@@ -148,7 +147,6 @@ struct LibraryView: View {
                       allowsMultipleSelection: false) { result in
             handlePDFSelection(result)
         }
-        // 深色背景上保证文字可读
         .preferredColorScheme(.dark)
         .onChange(of: library.books.count) { count in
             carouselIndex = min(max(carouselIndex, 0), max(count - 1, 0))
@@ -169,7 +167,6 @@ struct LibraryView: View {
             BookCarousel(books: library.books,
                          index: $carouselIndex,
                          onOpen: { book in
-                             // 去掉翻开动画，直接进书
                              path.append(book.id)
                          },
                          onCover: { book in
@@ -258,7 +255,6 @@ struct LibraryView: View {
             let accessing = url.startAccessingSecurityScopedResource()
             defer { if accessing { url.stopAccessingSecurityScopedResource() } }
 
-            // 拷进沙盒，异步渲染时授权还在
             let dest = FileStorage.documents.appendingPathComponent("import-temp.pdf")
             try? FileManager.default.removeItem(at: dest)
 
@@ -269,7 +265,6 @@ struct LibraryView: View {
                 target = url
             }
 
-            // 等文件选择器收完再弹导入界面
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
                 activeSheet = .pdf(target)
             }
