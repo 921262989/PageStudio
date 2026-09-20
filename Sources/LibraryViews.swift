@@ -18,6 +18,9 @@ struct LibraryView: View {
     @State private var showPDFPicker = false
     @State private var pdfFileRef: PDFFileRef?
 
+    // 图片批量导入
+    @State private var showPhotoImport = false
+
     var body: some View {
         NavigationStack(path: $path) {
             Group {
@@ -42,10 +45,19 @@ struct LibraryView: View {
                         } label: {
                             Label("新建空白画册", systemImage: "book")
                         }
+
+                        Divider()
+
                         Button {
-                            showPDFPicker = true
+                            delayed { showPDFPicker = true }
                         } label: {
                             Label("导入 PDF", systemImage: "doc.richtext")
+                        }
+
+                        Button {
+                            delayed { showPhotoImport = true }
+                        } label: {
+                            Label("批量导入图片", systemImage: "photo.stack")
                         }
                     } label: {
                         Image(systemName: "plus")
@@ -55,60 +67,71 @@ struct LibraryView: View {
             .navigationDestination(for: UUID.self) { id in
                 BookReaderView(bookID: id)
             }
-            .sheet(isPresented: $showSettings) {
-                SettingsView()
-                    .environmentObject(settingsStore)
-            }
-            .sheet(item: $coverEditingBook) { book in
-                CoverPickerView(
-                    initialStyle: book.coverStyle,
-                    hasCustomImage: book.customCoverImage != nil,
-                    onStyle: { style in
-                        var updated = book
-                        updated.coverStyle = style
-                        library.update(updated)
-                    },
-                    onCustomImage: { name in
-                        var updated = book
-                        updated.customCoverImage = name
-                        library.update(updated)
-                    }
-                )
-            }
-            .sheet(item: $pdfFileRef) { ref in
-                PDFImportSheet(fileURL: ref.url)
-                    .environmentObject(library)
-            }
-            .fileImporter(isPresented: $showPDFPicker,
-                          allowedContentTypes: [.pdf],
-                          allowsMultipleSelection: false) { result in
-                handlePDFSelection(result)
-            }
-            .alert("新建画册", isPresented: $showNewBookAlert) {
-                TextField("画册名称", text: $newBookTitle)
-                Button("取消", role: .cancel) {}
-                Button("创建") {
-                    library.createBook(title: newBookTitle)
-                    carouselIndex = 0
+        }
+        // ⚠️ 所有呈现类修饰符都挂在 NavigationStack 最外层，
+        //    挂在里层（Group 上）会导致 fileImporter 静默失败。
+        .fileImporter(isPresented: $showPDFPicker,
+                      allowedContentTypes: [.pdf],
+                      allowsMultipleSelection: false) { result in
+            handlePDFSelection(result)
+        }
+        .sheet(isPresented: $showSettings) {
+            SettingsView()
+                .environmentObject(settingsStore)
+        }
+        .sheet(item: $coverEditingBook) { book in
+            CoverPickerView(
+                initialStyle: book.coverStyle,
+                hasCustomImage: book.customCoverImage != nil,
+                onStyle: { style in
+                    var updated = book
+                    updated.coverStyle = style
+                    library.update(updated)
+                },
+                onCustomImage: { name in
+                    var updated = book
+                    updated.customCoverImage = name
+                    library.update(updated)
                 }
+            )
+        }
+        .sheet(item: $pdfFileRef) { ref in
+            PDFImportSheet(fileURL: ref.url)
+                .environmentObject(library)
+        }
+        .sheet(isPresented: $showPhotoImport) {
+            PhotoImportSheet()
+                .environmentObject(library)
+        }
+        .alert("新建画册", isPresented: $showNewBookAlert) {
+            TextField("画册名称", text: $newBookTitle)
+            Button("取消", role: .cancel) {}
+            Button("创建") {
+                library.createBook(title: newBookTitle)
+                carouselIndex = 0
             }
-            .alert("重命名画册", isPresented: renameAlertBinding) {
-                TextField("画册名称", text: $renameTitle)
-                Button("取消", role: .cancel) { bookToRename = nil }
-                Button("保存") {
-                    if var b = bookToRename {
-                        let trimmed = renameTitle
-                            .trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !trimmed.isEmpty { b.title = trimmed }
-                        library.update(b)
-                    }
-                    bookToRename = nil
+        }
+        .alert("重命名画册", isPresented: renameAlertBinding) {
+            TextField("画册名称", text: $renameTitle)
+            Button("取消", role: .cancel) { bookToRename = nil }
+            Button("保存") {
+                if var b = bookToRename {
+                    let trimmed = renameTitle
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty { b.title = trimmed }
+                    library.update(b)
                 }
+                bookToRename = nil
             }
         }
         .onChange(of: library.books.count) { count in
             carouselIndex = min(max(carouselIndex, 0), max(count - 1, 0))
         }
+    }
+
+    /// 菜单项点击后延迟一点点再触发，避免和菜单收起动画打架
+    private func delayed(_ action: @escaping () -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: action)
     }
 
     private var renameAlertBinding: Binding<Bool> {
@@ -181,10 +204,17 @@ struct LibraryView: View {
             }
             .buttonStyle(.borderedProminent)
 
-            Button("导入一本 PDF") {
-                showPDFPicker = true
+            HStack(spacing: 12) {
+                Button("导入 PDF") {
+                    delayed { showPDFPicker = true }
+                }
+                .buttonStyle(.bordered)
+
+                Button("批量导入图片") {
+                    delayed { showPhotoImport = true }
+                }
+                .buttonStyle(.bordered)
             }
-            .buttonStyle(.bordered)
         }
     }
 
@@ -205,10 +235,16 @@ struct LibraryView: View {
             let dest = FileStorage.documents.appendingPathComponent("import-temp.pdf")
             try? FileManager.default.removeItem(at: dest)
 
+            let target: URL
             if (try? FileManager.default.copyItem(at: url, to: dest)) != nil {
-                pdfFileRef = PDFFileRef(url: dest)
+                target = dest
             } else {
-                pdfFileRef = PDFFileRef(url: url)
+                target = url
+            }
+
+            // 再延迟一下，避免和文件选择器的收起动画打架
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                pdfFileRef = PDFFileRef(url: target)
             }
         }
     }
