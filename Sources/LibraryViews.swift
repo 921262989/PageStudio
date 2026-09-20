@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 enum LibrarySheet: Identifiable {
     case settings
     case cover(Book)
+    case pageStyle(Book)
     case pdf(URL)
     case photoImport
 
@@ -13,6 +14,7 @@ enum LibrarySheet: Identifiable {
         switch self {
         case .settings:        return "settings"
         case .cover(let b):    return "cover-\(b.id.uuidString)"
+        case .pageStyle(let b): return "style-\(b.id.uuidString)"
         case .pdf(let url):    return "pdf-\(url.lastPathComponent)"
         case .photoImport:     return "photoImport"
         }
@@ -131,6 +133,9 @@ struct LibraryView: View {
                     }
                 )
 
+            case .pageStyle(let book):
+                PageStyleEditor(bookID: book.id, bookTitle: book.title)
+
             case .pdf(let url):
                 PDFImportSheet(fileURL: url)
                     .environmentObject(library)
@@ -173,6 +178,9 @@ struct LibraryView: View {
                          onRename: { book in
                              bookToRename = book
                              renameTitle = book.title
+                         },
+                         onPageStyle: { book in
+                             activeSheet = .pageStyle(book)
                          },
                          onDelete: { book in
                              library.delete(book)
