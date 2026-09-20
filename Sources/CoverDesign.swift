@@ -58,7 +58,7 @@ enum CoverStyle: String, Codable, CaseIterable, Identifiable, Hashable {
         }
     }
 
-    /// 花纹 / 浅色封面上的文字该用黑还是白
+    /// 浅色底需要深色文字
     var prefersDarkText: Bool {
         switch self {
         case .patternMarble, .patternLinen, .kraft:
@@ -274,7 +274,7 @@ struct NotebookCoverView: View {
                                    endPoint: .bottomTrailing)
                 )
 
-            // 花纹层（纯色封面上没有）
+            // 花纹层（纯色封面上不画东西）
             BookPattern(style: book.coverStyle)
                 .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                 .allowsHitTesting(false)
@@ -551,8 +551,10 @@ struct CoverPickerView: View {
                 Task { await loadForCrop(item) }
             }
             .fullScreenCover(isPresented: $showCropper) {
-                if let cropImage {
-                    CoverCropView(image: cropImage,
+                // ⚠️ 解包时换个名字（img），
+                //    否则闭包里那个 cropImage 是 let 常量，不能赋值。
+                if let img = cropImage {
+                    CoverCropView(image: img,
                                   onDone: { ui in
                                       showCropper = false
                                       saveCropped(ui)
