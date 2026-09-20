@@ -1,27 +1,67 @@
 import SwiftUI
 import PencilKit
 
-// MARK: - 设置
+// MARK: - 设置 + 自定义颜色
 
 final class AppSettingsStore: ObservableObject {
-    private static let storageKey = "AppSettings.v1"
+    private static let settingsKey = "AppSettings.v1"
+    private static let colorsKey = "SavedBrushColors.v1"
+    /// 自定义颜色最多保留多少个
+    private static let maxSavedColors = 12
 
     @Published var settings: AppSettings {
-        didSet { save() }
+        didSet { saveSettings() }
+    }
+
+    /// 用户固定到笔刷栏的自定义颜色
+    @Published var savedColors: [SavedBrushColor] = [] {
+        didSet { saveColors() }
     }
 
     init() {
-        if let data = UserDefaults.standard.data(forKey: Self.storageKey),
+        if let data = UserDefaults.standard.data(forKey: Self.settingsKey),
            let decoded = try? JSONDecoder().decode(AppSettings.self, from: data) {
             settings = decoded
         } else {
             settings = AppSettings()
         }
+
+        if let data = UserDefaults.standard.data(forKey: Self.colorsKey),
+           let decoded = try? JSONDecoder().decode([SavedBrushColor].self, from: data) {
+            savedColors = decoded
+        }
     }
 
-    private func save() {
+    // MARK: 自定义颜色
+
+    /// 把颜色固定到笔刷栏。已存在则不重复添加。
+    func addColor(_ color: Color) {
+        let hex = color.hexString
+        guard !savedColors.contains(where: { $0.hex == hex }) else { return }
+        savedColors.append(SavedBrushColor(hex: hex))
+        if savedColors.count > Self.maxSavedColors {
+            savedColors.removeFirst(savedColors.count - Self.maxSavedColors)
+        }
+    }
+
+    func removeColor(_ item: SavedBrushColor) {
+        savedColors.removeAll { $0.id == item.id }
+    }
+
+    func removeColor(at offsets: IndexSet) {
+        savedColors.remove(atOffsets: offsets)
+    }
+
+    // MARK: 落盘
+
+    private func saveSettings() {
         guard let data = try? JSONEncoder().encode(settings) else { return }
-        UserDefaults.standard.set(data, forKey: Self.storageKey)
+        UserDefaults.standard.set(data, forKey: Self.settingsKey)
+    }
+
+    private func saveColors() {
+        guard let data = try? JSONEncoder().encode(savedColors) else { return }
+        UserDefaults.standard.set(data, forKey: Self.colorsKey)
     }
 }
 
@@ -42,7 +82,6 @@ final class LibraryStore: ObservableObject {
     func createBook(title: String) -> Book {
         var book = Book()
         book.title = title.isEmpty ? "未命名画册" : title
-        // 随机发一个纯色封面
         book.coverStyle = CoverStyle.allCases.randomElement() ?? .indigo
         book.pages = [Page.blank(), Page.blank()]
         books.insert(book, at: 0)
@@ -92,9 +131,6 @@ final class LibraryStore: ObservableObject {
 
 // MARK: - 笔迹
 
-/// 笔迹以「跨页」为单位落盘。
-/// 内存里缓存；写盘延迟 0.4 秒合并，防强退丢数据又避免频繁 IO。
-/// `revision` 在写盘后自增，用来通知界面「这个跨页的笔迹变了，重新烘焙」。
 final class DrawingStore: ObservableObject {
 
     @Published private(set) var revision: Int = 0
