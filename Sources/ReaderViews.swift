@@ -128,7 +128,7 @@ struct SinglePageView: View {
             .overlay {
                 if bordered {
                     Rectangle()
-                        .stroke(theme.paperBorderColor, lineWidth: 0.5)
+                        .stroke(PaperStyle.border, lineWidth: 0.5)
                 }
             }
     }
