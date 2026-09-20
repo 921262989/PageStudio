@@ -46,7 +46,6 @@ struct DrawingCanvas: UIViewRepresentable {
     var onZoomChanged: (CGFloat) -> Void = { _ in }
 
     /// 「100%」对应的 zoomScale
-    /// 加了上下限保护：viewportSize 异常时不会算出 0 / NaN / 无穷大
     private var fitScale: CGFloat {
         guard canvasSize.height > 0, viewportSize.height > 0 else { return 1 }
         let raw = viewportSize.height / canvasSize.height
@@ -69,21 +68,26 @@ struct DrawingCanvas: UIViewRepresentable {
         scroll.backgroundColor = .clear
         scroll.isOpaque = false
         scroll.contentInsetAdjustmentBehavior = .never
+        scroll.bounces = false
+        scroll.bouncesZoom = false
+        scroll.showsHorizontalScrollIndicator = false
+        scroll.showsVerticalScrollIndicator = false
+        scroll.delegate = context.coordinator
 
         // 缩放范围：fit = 100%
         scroll.minimumZoomScale = fit
         scroll.maximumZoomScale = fit * 6
         scroll.setZoomScale(fit, animated: false)
-        scroll.bouncesZoom = true
-        scroll.showsHorizontalScrollIndicator = false
-        scroll.showsVerticalScrollIndicator = false
-        scroll.delegate = context.coordinator
 
-        // 单指留给画笔，双指才平移/缩放
-        scroll.panGestureRecognizer.minimumNumberOfTouches = 2
-        scroll.panGestureRecognizer.maximumNumberOfTouches = 2
-        scroll.delaysContentTouches = false
-        scroll.canCancelContentTouches = false
+        // ⚠️⚠️ 关键：把系统自带的 pinch / pan 全部关掉。
+        //
+        // 系统自带的这两个手势，delegate 在 UIKit 内部是私有对象：
+        //   · 给它设自定义 delegate → 立刻抛异常 → 闪退（之前那个崩溃）
+        //   · 不设 delegate       → 它争不过 PKCanvasView 的画图手势 → 双指完全没反应
+        //
+        // 两条路都是死的，所以干脆不用它们，下面自己造两个。
+        scroll.pinchGestureRecognizer?.isEnabled = false
+        scroll.panGestureRecognizer.isEnabled = false
 
         let canvas = PKCanvasView()
         canvas.frame = CGRect(origin: .zero, size: canvasSize)
@@ -94,13 +98,14 @@ struct DrawingCanvas: UIViewRepresentable {
         canvas.tool = tool
         canvas.drawingPolicy = pencilOnly ? .pencilOnly : .anyInput
 
-        // 画布自身的滚动/缩放全部关掉，避免和外层抢手势
+        // 画布自身的滚动 / 缩放全部关掉，避免和外层抢
         canvas.isScrollEnabled = false
         canvas.minimumZoomScale = 1
         canvas.maximumZoomScale = 1
         canvas.alwaysBounceVertical = false
         canvas.alwaysBounceHorizontal = false
         canvas.pinchGestureRecognizer?.isEnabled = false
+        canvas.panGestureRecognizer.isEnabled = false
 
         canvas.delegate = context.coordinator
 
@@ -113,18 +118,29 @@ struct DrawingCanvas: UIViewRepresentable {
 
         applyInitialOffset(scroll, fit: fit, animated: false, in: context.coordinator)
 
-        // ⚠️⚠️ 这里以前有两行代码，是「点编辑闪退」的元凶，已删除：
-        //
-        //     if let pinch = scroll.pinchGestureRecognizer {
-        //         pinch.delegate = context.coordinator
-        //     }
-        //     scroll.panGestureRecognizer.delegate = context.coordinator
-        //
-        // 原因：UIScrollView 自带的 pinch / pan 手势，delegate 在 UIKit 内部是私有对象。
-        // 被外部替换后，UIKit 依旧会向这个 delegate 发送私有方法，Coordinator 不响应，
-        // 直接抛 unrecognized selector 异常 → SIGABRT 闪退（崩溃日志已证实）。
-        // 这两个手势不需要自定义 delegate 也能正常工作，单指画画与双指手势靠指头数区分，
-        // 本来就不会冲突。
+        // MARK: 双指捏合 → 缩放（自己造的手势，可以安全设 delegate）
+        let pinch = UIPinchGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handlePinch(_:))
+        )
+        pinch.delegate = context.coordinator
+        pinch.cancelsTouchesInView = false
+        pinch.delaysTouchesBegan = false
+        scroll.addGestureRecognizer(pinch)
+        context.coordinator.customPinch = pinch
+
+        // MARK: 双指拖动 → 平移（同样自己造）
+        let twoPan = UIPanGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handleTwoFingerPan(_:))
+        )
+        twoPan.minimumNumberOfTouches = 2
+        twoPan.maximumNumberOfTouches = 2
+        twoPan.delegate = context.coordinator
+        twoPan.cancelsTouchesInView = false
+        twoPan.delaysTouchesBegan = false
+        scroll.addGestureRecognizer(twoPan)
+        context.coordinator.twoFingerPan = twoPan
 
         // MARK: 双指轻点 → 撤销
         let twoTap = UITapGestureRecognizer(
@@ -278,6 +294,10 @@ struct DrawingCanvas: UIViewRepresentable {
         context.coordinator.fourFingerTap?.isEnabled = on && fourFingerClear
         context.coordinator.eyedropperGesture?.isEnabled =
             on && longPressEyedropper && pencilOnly
+
+        // 缩放 / 平移是基础能力，永远开启，不受手势总开关影响
+        context.coordinator.customPinch?.isEnabled = true
+        context.coordinator.twoFingerPan?.isEnabled = true
     }
 
     // MARK: - 偏移换算
@@ -333,6 +353,8 @@ struct DrawingCanvas: UIViewRepresentable {
         var lastZoomOutTrigger: Int = 0
         var lastAppliedOffsetX: CGFloat = -1
 
+        weak var customPinch: UIPinchGestureRecognizer?
+        weak var twoFingerPan: UIPanGestureRecognizer?
         weak var twoFingerTap: UITapGestureRecognizer?
         weak var rapidUndoGesture: UILongPressGestureRecognizer?
         weak var threeFingerTap: UITapGestureRecognizer?
@@ -340,6 +362,9 @@ struct DrawingCanvas: UIViewRepresentable {
         weak var eyedropperGesture: UILongPressGestureRecognizer?
 
         private var rapidUndoTimer: Timer?
+        private var pinchStartScale: CGFloat = 1
+        private var panStartOffset: CGPoint = .zero
+        private var canvasInteractionSuspended = false
 
         /// 上一次已经回传给 SwiftUI 的缩放倍率（去重用）
         private var lastReportedRatio: CGFloat = -1
@@ -381,8 +406,7 @@ struct DrawingCanvas: UIViewRepresentable {
             reportZoom(scrollView)
         }
 
-        /// 读取缩放倍率 → 做数值保护 → 排队到下一个 runloop 再回传 SwiftUI。
-        /// 异步派发是为了不在 SwiftUI 的视图更新事务里写 @State。
+        /// 读取缩放倍率 → 数值保护 → 排队到下一个 runloop 再回传 SwiftUI。
         private func reportZoom(_ scrollView: UIScrollView) {
             let fit = scrollView.minimumZoomScale
             guard fit > 0, fit.isFinite else { return }
@@ -395,7 +419,6 @@ struct DrawingCanvas: UIViewRepresentable {
         }
 
         /// 统一出口：所有缩放倍率都从这里出去，保证在 SwiftUI 更新事务之外送达。
-        /// force = true 用于「吸回 100% / 重置缩放」这类必须强推一次的场景。
         func publishZoom(_ ratio: CGFloat, force: Bool = false) {
             guard ratio.isFinite else { return }
             if !force {
@@ -408,7 +431,7 @@ struct DrawingCanvas: UIViewRepresentable {
             }
         }
 
-        /// 以当前视口中心为锚点精确缩放
+        /// 以当前缩放为基准精确缩放（± 按钮用）
         func zoom(by factor: CGFloat) {
             guard let scroll else { return }
             let target = min(max(scroll.zoomScale * factor,
@@ -423,10 +446,87 @@ struct DrawingCanvas: UIViewRepresentable {
             }
         }
 
+        // MARK: 双指捏合（自己造的手势）
+
+        @objc func handlePinch(_ g: UIPinchGestureRecognizer) {
+            guard let scroll, let canvas else { return }
+
+            switch g.state {
+            case .began:
+                pinchStartScale = scroll.zoomScale
+                suspendCanvasInteraction(true)
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+
+            case .changed:
+                let minS = scroll.minimumZoomScale
+                let maxS = scroll.maximumZoomScale
+                let target = pinchStartScale * g.scale
+                guard target.isFinite else { return }
+                let clamped = min(max(target, minS), maxS)
+                scroll.setZoomScale(clamped, animated: false)
+                canvas.bounds.size = canvasSizeOf(canvas)
+
+            case .ended, .cancelled, .failed:
+                suspendCanvasInteraction(false)
+                if let s = self.scroll { reportZoom(s) }
+
+            default:
+                break
+            }
+        }
+
+        // MARK: 双指拖动（自己造的手势）
+
+        @objc func handleTwoFingerPan(_ g: UIPanGestureRecognizer) {
+            guard let scroll, let canvas else { return }
+
+            switch g.state {
+            case .began:
+                panStartOffset = scroll.contentOffset
+                suspendCanvasInteraction(true)
+
+            case .changed:
+                let t = g.translation(in: scroll)
+                guard t.x.isFinite, t.y.isFinite else { return }
+
+                let scale = scroll.zoomScale
+                let contentW = canvas.bounds.width * scale
+                let contentH = canvas.bounds.height * scale
+                let maxX = max(contentW - scroll.bounds.width, 0)
+                let maxY = max(contentH - scroll.bounds.height, 0)
+
+                let x = min(max(panStartOffset.x - t.x, 0), maxX)
+                let y = min(max(panStartOffset.y - t.y, 0), maxY)
+                scroll.contentOffset = CGPoint(x: x, y: y)
+
+            case .ended, .cancelled, .failed:
+                suspendCanvasInteraction(false)
+
+            default:
+                break
+            }
+        }
+
+        /// 捏合 / 平移进行中时，暂时挂起画布自身的触摸，
+        /// 避免「两指按下去，第一根手指在纸上留下一道线」。
+        private func suspendCanvasInteraction(_ suspend: Bool) {
+            guard let canvas else { return }
+            guard canvasInteractionSuspended != suspend else { return }
+            canvasInteractionSuspended = suspend
+            canvas.isUserInteractionEnabled = !suspend
+        }
+
+        private func canvasSizeOf(_ canvas: PKCanvasView) -> CGSize {
+            canvas.bounds.size
+        }
+
         // MARK: 手势优先级
 
         func gestureRecognizer(_ g: UIGestureRecognizer,
                                shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            // ⚠️ 必须是 true。
+            // PKCanvasView 的画图手势会争夺所有触摸，只有明确声明「可以同时识别」，
+            // 我们自己造的捏合 / 双指拖动才能在画布上方正常工作。
             true
         }
 
@@ -443,7 +543,6 @@ struct DrawingCanvas: UIViewRepresentable {
         // MARK: PKCanvasView
 
         func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
-            // 异步回传：这个回调可能在 SwiftUI 视图更新事务中被触发
             let drawing = canvasView.drawing
             DispatchQueue.main.async { [weak self] in
                 self?.onDrawingChanged(drawing)
