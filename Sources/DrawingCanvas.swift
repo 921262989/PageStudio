@@ -1,79 +1,31 @@
 import SwiftUI
 import PencilKit
-
-// MARK: - 笔类型 / 颜色 / 粗细
-
-enum PenKind: String, CaseIterable {
-    case pen
-    case marker
-    case pencil
-    case eraser
-
-    var systemImage: String {
-        switch self {
-        case .pen:    return "pencil.tip"
-        case .marker: return "highlighter"
-        case .pencil: return "pencil"
-        case .eraser: return "eraser"
-        }
-    }
-
-    var displayName: String {
-        switch self {
-        case .pen:    return "钢笔"
-        case .marker: return "马克笔"
-        case .pencil: return "铅笔"
-        case .eraser: return "橡皮"
-        }
-    }
-}
-
-enum PenColor: String, CaseIterable {
-    case black, red, blue, green, orange, purple
-
-    var color: Color {
-        switch self {
-        case .black:  return .black
-        case .red:    return Color(red: 0.85, green: 0.16, blue: 0.16)
-        case .blue:   return Color(red: 0.10, green: 0.35, blue: 0.85)
-        case .green:  return Color(red: 0.10, green: 0.60, blue: 0.30)
-        case .orange: return Color(red: 0.95, green: 0.55, blue: 0.10)
-        case .purple: return Color(red: 0.55, green: 0.25, blue: 0.80)
-        }
-    }
-}
-
-enum PenWidth: Double, CaseIterable {
-    case thin = 2
-    case medium = 6
-    case thick = 14
-
-    var dotSize: CGFloat {
-        switch self {
-        case .thin:   return 6
-        case .medium: return 11
-        case .thick:  return 17
-        }
-    }
-}
-
-// MARK: - 画布
+import UIKit
 
 /// PencilKit 画布的 SwiftUI 封装。
 ///
-/// ⚠️ `canvasSize` 永远传「逻辑跨页尺寸」（DrawingGeometry.spreadSize），
-/// 与屏幕大小无关。显示时由外层 scaleEffect 缩放。
+/// ⚠️ 两层结构：
+/// - 外层 `UIScrollView`：负责用户的双指捏合缩放 / 双指平移（1×–6×）
+/// - 内层 `PKCanvasView`：负责笔迹绘制
+///
+/// `canvasSize` 永远传「逻辑跨页尺寸」（DrawingGeometry.spreadSize），
+/// 与屏幕大小、缩放倍率都无关，所以笔迹坐标永远稳定。
 struct DrawingCanvas: UIViewRepresentable {
 
     let canvasSize: CGSize
     let initialDrawing: PKDrawing
     let pencilOnly: Bool
     let tool: PKTool
+    /// 工具签名。只有它变了才会重设 canvas.tool。
+    /// 频繁重设工具会打断笔迹渲染，所以必须由调用方提供一个「稳定的」字符串。
+    let toolSignature: String
+
     let undoTrigger: Int
     let redoTrigger: Int
     let clearTrigger: Int
+    let zoomResetTrigger: Int
+
     let onDrawingChanged: (PKDrawing) -> Void
-    /// 正在落笔 / 抬笔 —— 用来避免烘焙图和实时画布重影
     let onDrawingStateChanged: (Bool) -> Void
 
     func makeCoordinator() -> Coordinator {
@@ -81,17 +33,32 @@ struct DrawingCanvas: UIViewRepresentable {
                     onDrawingStateChanged: onDrawingStateChanged)
     }
 
-    func makeUIView(context: Context) -> PKCanvasView {
+    func makeUIView(context: Context) -> UIScrollView {
+        let scroll = UIScrollView()
+        scroll.backgroundColor = .clear
+        scroll.isOpaque = false
+        scroll.contentInsetAdjustmentBehavior = .never
+        scroll.minimumZoomScale = 1
+        scroll.maximumZoomScale = 6
+        scroll.bouncesZoom = true
+        scroll.showsHorizontalScrollIndicator = false
+        scroll.showsVerticalScrollIndicator = false
+        scroll.delegate = context.coordinator
+        // 单指留给画笔，双指才平移/缩放
+        scroll.panGestureRecognizer.minimumNumberOfTouches = 2
+        scroll.delaysContentTouches = false
+        scroll.canCancelContentTouches = false
+
         let canvas = PKCanvasView()
         canvas.frame = CGRect(origin: .zero, size: canvasSize)
         canvas.bounds = CGRect(origin: .zero, size: canvasSize)
-
         canvas.backgroundColor = .clear
         canvas.isOpaque = false
         canvas.drawing = initialDrawing
         canvas.tool = tool
         canvas.drawingPolicy = pencilOnly ? .pencilOnly : .anyInput
 
+        // 画布自身不滚动 —— 缩放交给外层
         canvas.isScrollEnabled = false
         canvas.minimumZoomScale = 1
         canvas.maximumZoomScale = 1
@@ -99,16 +66,29 @@ struct DrawingCanvas: UIViewRepresentable {
         canvas.alwaysBounceHorizontal = false
 
         canvas.delegate = context.coordinator
-        return canvas
+
+        scroll.addSubview(canvas)
+        scroll.contentSize = canvasSize
+
+        context.coordinator.scroll = scroll
+        context.coordinator.canvas = canvas
+        context.coordinator.lastToolSignature = toolSignature
+        context.coordinator.lastPencilOnly = pencilOnly
+        return scroll
     }
 
-    func updateUIView(_ canvas: PKCanvasView, context: Context) {
+    func updateUIView(_ scroll: UIScrollView, context: Context) {
+        guard let canvas = context.coordinator.canvas else { return }
+
         context.coordinator.onDrawingChanged = onDrawingChanged
         context.coordinator.onDrawingStateChanged = onDrawingStateChanged
 
         if canvas.bounds.size != canvasSize {
             canvas.frame = CGRect(origin: .zero, size: canvasSize)
             canvas.bounds = CGRect(origin: .zero, size: canvasSize)
+            scroll.contentSize = canvasSize
+            scroll.setZoomScale(1, animated: false)
+            scroll.contentOffset = .zero
         }
 
         let policy: PKCanvasViewDrawingPolicy = pencilOnly ? .pencilOnly : .anyInput
@@ -116,9 +96,10 @@ struct DrawingCanvas: UIViewRepresentable {
             canvas.drawingPolicy = policy
         }
 
+        // ⚠️ 只在签名真的变了才重设工具
         if context.coordinator.lastToolSignature != toolSignature {
-            canvas.tool = tool
             context.coordinator.lastToolSignature = toolSignature
+            canvas.tool = tool
         }
 
         if context.coordinator.lastUndoTrigger != undoTrigger {
@@ -134,19 +115,27 @@ struct DrawingCanvas: UIViewRepresentable {
             canvas.drawing = PKDrawing()
             onDrawingChanged(PKDrawing())
         }
+        if context.coordinator.lastZoomResetTrigger != zoomResetTrigger {
+            context.coordinator.lastZoomResetTrigger = zoomResetTrigger
+            scroll.setZoomScale(1, animated: true)
+            scroll.setContentOffset(.zero, animated: true)
+        }
+        context.coordinator.lastPencilOnly = pencilOnly
     }
 
-    private var toolSignature: String {
-        "\(pencilOnly)-\(tool)"
-    }
-
-    final class Coordinator: NSObject, PKCanvasViewDelegate {
+    final class Coordinator: NSObject, PKCanvasViewDelegate, UIScrollViewDelegate {
         var onDrawingChanged: (PKDrawing) -> Void
         var onDrawingStateChanged: (Bool) -> Void
+
+        weak var scroll: UIScrollView?
+        weak var canvas: PKCanvasView?
+
         var lastToolSignature: String = ""
         var lastUndoTrigger: Int = 0
         var lastRedoTrigger: Int = 0
         var lastClearTrigger: Int = 0
+        var lastZoomResetTrigger: Int = 0
+        var lastPencilOnly: Bool?
 
         init(onDrawingChanged: @escaping (PKDrawing) -> Void,
              onDrawingStateChanged: @escaping (Bool) -> Void) {
@@ -154,6 +143,12 @@ struct DrawingCanvas: UIViewRepresentable {
             self.onDrawingStateChanged = onDrawingStateChanged
         }
 
+        // UIScrollView 缩放的目标视图
+        func viewForZooming(in scrollView: UIScrollView) -> UIView? {
+            canvas
+        }
+
+        // PKCanvasView
         func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
             onDrawingChanged(canvasView.drawing)
         }
