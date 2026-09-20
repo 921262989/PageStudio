@@ -41,6 +41,12 @@ struct BookReaderView: View {
     /// 中间页面完全不渲染，防卡顿、防内存爆掉
     @State private var fastJumpActive = false
 
+    /// 正在落笔。落笔期间绝对不翻页。
+    /// SwiftUI 的 DragGesture 分不清手指和 Apple Pencil，
+    /// Pencil 划过纸边一样会算成拖动 → 画着画着就翻页。
+    /// 这个值由 PKCanvasView 的落笔 / 抬笔回调驱动。
+    @State private var isDrawingNow = false
+
     @State private var isPenActive = false
     @State private var activeTool: ActiveTool = .brush(.pen)
     @State private var penColor: Color = Color(white: 0.06)
@@ -176,6 +182,7 @@ struct BookReaderView: View {
                 }
             } else {
                 activePopover = nil
+                isDrawingNow = false
             }
         }
         .alert("提示",
@@ -244,13 +251,8 @@ struct BookReaderView: View {
                    value: activePopover)
     }
 
-    /// 笔刷 / 橡皮设置面板。
-    ///
-    /// ⚠️ 以前这里用的是 .popover(item:)，而且挂在整屏那个大视图上。
-    /// 在 iPad 上 SwiftUI 拿不到锚点时，popover 会「静默不显示」——
-    /// 不报错、不崩溃，就是不弹出来。这就是「二次点击笔刷 / 橡皮没反应」
-    /// 以及「矢量橡皮像是没了」的真正原因。
-    /// 现在改成直接贴在工具栏上方的浮层卡片，不再依赖系统 popover。
+    /// 笔刷 / 橡皮设置面板，直接贴在工具栏上方的浮层卡片。
+    /// 以前用 .popover(item:) 挂在整屏视图上，iPad 上拿不到锚点会静默不显示。
     @ViewBuilder
     private func toolPanel(_ item: ToolPopover) -> some View {
         switch item {
@@ -313,8 +315,6 @@ struct BookReaderView: View {
     }
 
     /// 快速定位时的降级画面：只画一张白纸 + 位置文字。
-    /// 拖进度条 / 一次跨很多页时走这里，中间页面完全不渲染，
-    /// 既不掉帧，也不会因为同时挂着几十个页面视图把内存撑爆。
     @ViewBuilder
     private func quickJumpScene(book: Book, size: ReaderSize) -> some View {
         VStack(spacing: 12) {
@@ -385,7 +385,6 @@ struct BookReaderView: View {
                 .allowsHitTesting(false)
 
             ForEach(layers) { meta in
-                // ⚠️ 当前图层走实时画布时，也必须尊重「隐藏」和「透明度」。
                 if editingThisUnit && meta.id == activeID {
                     if meta.isVisible {
                         drawingCanvas(book: book, unitIndex: index, size: size,
@@ -399,8 +398,7 @@ struct BookReaderView: View {
                                  size: spreadSize,
                                  revision: layerStore.version,
                                  opacity: meta.opacity)
-                        // ⚠️ 关键：笔迹图盖在画布上面，如果不关掉命中测试，
-                        //    双指捏合、平移、吸色全都会被它吃掉
+                        // 笔迹图盖在画布上面，不关掉命中测试会吃掉双指手势
                         .allowsHitTesting(false)
                 }
             }
@@ -728,7 +726,13 @@ struct BookReaderView: View {
                 handleAutoAppend(book: book, spreadIndex: spreadIndex,
                                  drawing: newDrawing)
             },
-            onDrawingStateChanged: { _ in },
+            onDrawingStateChanged: { drawing in
+                // 落笔 / 抬笔：落笔期间禁止翻页，
+                // 这样 Apple Pencil 从纸中间划到边缘也不会翻页。
+                DispatchQueue.main.async {
+                    isDrawingNow = drawing
+                }
+            },
             onPickColor: { picked in
                 DispatchQueue.main.async {
                     penColor = picked
@@ -759,7 +763,7 @@ struct BookReaderView: View {
         switch activeTool {
         case .brush(let kind):
             let s = settingsStore.brushSettings(for: kind)
-            let ui = UIColor(penColor).withAlphaComponent(s.clampedOpacity)
+            let ui = brushUIColor(alpha: s.clampedOpacity)
             let width = s.clampedWidth * kind.widthMultiplier
             return PKInkingTool(kind.inkType, color: ui, width: width)
 
@@ -770,6 +774,33 @@ struct BookReaderView: View {
                 return PKEraserTool(eraserKind.pkType)
             }
         }
+    }
+
+    /// 把 penColor 解析成「纯数值」的 UIColor。
+    ///
+    /// 不走 UIColor(Color)：那次转换依赖当前外观（深色 / 浅色），
+    /// 在这个强制深色的阅读器里可能把黑和白解析反 ——
+    /// 表现就是「编辑里看着是黑，画出来是白，退出编辑又正常」。
+    /// 这里优先用 cgColor 的数值分量，完全脱离外观。
+    private func brushUIColor(alpha: CGFloat) -> UIColor {
+        let a = min(max(alpha, 0), 1)
+
+        if let cg = penColor.cgColor,
+           let comps = cg.components,
+           !comps.isEmpty {
+
+            if comps.count >= 3 {
+                return UIColor(red: min(max(comps[0], 0), 1),
+                               green: min(max(comps[1], 0), 1),
+                               blue: min(max(comps[2], 0), 1),
+                               alpha: a)
+            }
+            if comps.count == 2 {
+                let g = min(max(comps[0], 0), 1)
+                return UIColor(red: g, green: g, blue: g, alpha: a)
+            }
+        }
+        return UIColor(penColor).withAlphaComponent(a)
     }
 
     private var toolSignature: String {
@@ -793,7 +824,14 @@ struct BookReaderView: View {
     // MARK: - 手势
 
     private var pagingEnabled: Bool {
-        !(isPenActive && !settings.pencilOnlyDrawMode)
+        // 正在落笔：绝不翻页
+        if isDrawingNow { return false }
+        // 阅读模式：随时可以翻
+        if !isPenActive { return true }
+        // 编辑模式（仅 Pencil）：没在画的时候，手指可以翻页
+        if settings.pencilOnlyDrawMode { return true }
+        // 编辑模式（手指 + Pencil）：手指一碰就是画线，无法翻页
+        return false
     }
 
     private var edgeTapActive: Bool {
@@ -857,7 +895,7 @@ struct BookReaderView: View {
     private func edgeTapGesture(available: CGSize, book: Book) -> some Gesture {
         SpatialTapGesture()
             .onEnded { value in
-                guard edgeTapActive else { return }
+                guard edgeTapActive, !isDrawingNow else { return }
                 let w = available.width
                 let x = value.location.x
 
@@ -1138,27 +1176,6 @@ struct BookReaderView: View {
 
                 rowDivider
 
-                toolButton(isActive: false, systemImage: "minus.magnifyingglass") {
-                    zoomOutTrigger += 1
-                }
-                Button {
-                    zoomResetTrigger += 1
-                } label: {
-                    Text("\(Int((zoomLevel * 100).rounded()))%")
-                        .font(.system(size: 12, weight: .medium).monospacedDigit())
-                        .foregroundStyle(.white)
-                        .frame(minWidth: 52)
-                        .frame(height: 32)
-                        .background(Color.white.opacity(0.12),
-                                    in: RoundedRectangle(cornerRadius: 8))
-                }
-                .buttonStyle(.plain)
-                toolButton(isActive: false, systemImage: "plus.magnifyingglass") {
-                    zoomInTrigger += 1
-                }
-
-                rowDivider
-
                 toolButton(isActive: false, systemImage: "chevron.down") {
                     withAnimation(.spring(response: 0.30, dampingFraction: 0.82)) {
                         brushBarCollapsed = true
@@ -1184,11 +1201,8 @@ struct BookReaderView: View {
                     }
                 }
 
-                // ⚠️ 以前这里绑定的是 draftColor，再用 onChange 把值抄给 penColor。
-                //    问题：SwiftUI 每次重算界面都会重建这个 ColorPicker，
-                //    它会把自己的内部值回写给 draftColor → 触发 onChange →
-                //    在你不知情的时候把 penColor 覆盖掉（吸到浅色就「笔刷变淡」）。
-                //    现在直接绑 penColor，没有中间变量，颜色不会再被偷偷改掉。
+                // 直接绑 penColor，不再经过 draftColor 中转，
+                // 避免界面重算时颜色被偷偷改掉（笔刷莫名变淡）。
                 ColorPicker("", selection: $penColor, supportsOpacity: false)
                     .labelsHidden()
                     .frame(width: 26, height: 26)
@@ -1460,8 +1474,11 @@ struct BookReaderView: View {
                 if ext == "pdf" {
                     let dest = FileStorage.documents
                         .appendingPathComponent("import-\(UUID().uuidString).pdf")
-                    if (try? FileManager.default.copyItem(at: url, to: dest)) != nil {
+                    do {
+                        try FileManager.default.copyItem(at: url, to: dest)
                         pdfURLs.append(dest)
+                    } catch {
+                        importMessage = "读取 PDF 失败：\(error.localizedDescription)"
                     }
                     continue
                 }
@@ -1483,14 +1500,17 @@ struct BookReaderView: View {
             }
 
             if !pdfURLs.isEmpty {
-                Task {
+                // ⚠️ 必须 @MainActor：下面会写 pdfImportProgress / pdfImportTotal
+                //    这些 @State，还要调 library.update()。
+                //    不在主线程写就会「没反应」——进度条不出现、页面也不跳出来。
+                Task { @MainActor in
                     for pdfURL in pdfURLs {
                         await importPDFPages(url: pdfURL, occupies: occupies)
                     }
                 }
             }
 
-            if imagePages.isEmpty && pdfURLs.isEmpty {
+            if imagePages.isEmpty && pdfURLs.isEmpty && importMessage == nil {
                 importMessage = "没有导入任何内容"
             }
         }
