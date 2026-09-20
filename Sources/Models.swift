@@ -98,7 +98,7 @@ struct Book: Identifiable, Codable, Hashable {
 
     init() {}
 
-    // 手写解码：老数据缺字段也能读出来，不会因为升级而丢书
+    // 手写解码：老数据缺字段也能读出来，升级不丢书
     enum CodingKeys: String, CodingKey {
         case id, title, bindingDirection, defaultViewMode, pageAspectRatio
         case coverPageAlone, coverStyle, customCoverImage, outline
@@ -226,4 +226,28 @@ struct AppSettings: Codable, Equatable {
     var zoomPersistOnTurn: Bool = true
     var pageTurnSound: Bool = false
     var pinchThreshold: Double = 0.15
+    var readerTheme: ReaderTheme = .classic
+
+    init() {}
+
+    enum CodingKeys: String, CodingKey {
+        case pencilOnlyDrawMode, autoAppendPage, edgeTapTurn
+        case zoomPersistOnTurn, pageTurnSound, pinchThreshold, readerTheme
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        pencilOnlyDrawMode = try c.decodeIfPresent(Bool.self,
+                                                   forKey: .pencilOnlyDrawMode) ?? true
+        autoAppendPage = try c.decodeIfPresent(Bool.self,
+                                               forKey: .autoAppendPage) ?? true
+        edgeTapTurn = try c.decodeIfPresent(Bool.self, forKey: .edgeTapTurn) ?? true
+        zoomPersistOnTurn = try c.decodeIfPresent(Bool.self,
+                                                  forKey: .zoomPersistOnTurn) ?? true
+        pageTurnSound = try c.decodeIfPresent(Bool.self, forKey: .pageTurnSound) ?? false
+        pinchThreshold = try c.decodeIfPresent(Double.self,
+                                               forKey: .pinchThreshold) ?? 0.15
+        readerTheme = try c.decodeIfPresent(ReaderTheme.self,
+                                            forKey: .readerTheme) ?? .classic
+    }
 }
