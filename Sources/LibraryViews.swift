@@ -144,7 +144,11 @@ struct BookCoverCell: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            NotebookCoverView(book: book)
+            // 用单元格的真实宽度驱动封面尺寸，列宽变化时封面自动跟着变
+            GeometryReader { geo in
+                NotebookCoverView(book: book, width: geo.size.width)
+            }
+            .aspectRatio(1.0 / 1.38, contentMode: .fit)
 
             Text(book.title)
                 .font(.headline)
