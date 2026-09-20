@@ -7,6 +7,14 @@ import UIKit
 
 enum PDFImporter {
 
+    /// ⚠️ PDFKit 的 PDFDocument / PDFPage **不是线程安全的**。
+    /// 以前用 DispatchQueue.global 并发渲染，PDFKit 经常直接返回 nil，
+    /// 表现就是「PDF 导不进去」。这里统一排队，一次只渲染一页。
+    private static let renderQueue = DispatchQueue(
+        label: "com.pagestudio.pdf.render",
+        qos: .userInitiated
+    )
+
     /// PDF 总页数
     static func pageCount(url: URL) -> Int {
         guard let doc = PDFDocument(url: url) else { return 0 }
@@ -14,19 +22,58 @@ enum PDFImporter {
     }
 
     /// 把第 index 页渲染成位图
-    /// - Parameter maxPixel: 长边最大像素数
+    /// - Parameter maxPixel: **长边像素数**（真正控制到像素，不再乘屏幕倍率）
     static func renderPage(url: URL, index: Int, maxPixel: CGFloat) -> UIImage? {
+        var result: UIImage?
+        renderQueue.sync {
+            result = autoreleasepool { renderPageLocked(url: url,
+                                                        index: index,
+                                                        maxPixel: maxPixel) }
+        }
+        return result
+    }
+
+    private static func renderPageLocked(url: URL,
+                                         index: Int,
+                                         maxPixel: CGFloat) -> UIImage? {
         guard let doc = PDFDocument(url: url),
               let page = doc.page(at: index) else { return nil }
 
         let bounds = page.bounds(for: .mediaBox)
         let w = max(bounds.width, 1)
         let h = max(bounds.height, 1)
-        let scale = maxPixel / max(w, h)
-        let size = CGSize(width: w * scale, height: h * scale)
 
-        // thumbnail 会自动处理页面旋转与裁剪
-        return page.thumbnail(of: size, for: .mediaBox)
+        // 自己算像素，绝不交给 thumbnail 去乘屏幕倍率
+        let scale = min(maxPixel / max(w, h), 8)
+        let pixelW = max((w * scale).rounded(), 1)
+        let pixelH = max((h * scale).rounded(), 1)
+
+        // 目标像素上限保护：超过 4000 万像素就直接放弃这一页，别把内存撑爆
+        guard pixelW * pixelH <= 40_000_000 else { return nil }
+
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1          // 像素 = 我们自己给的尺寸，不再乘倍率
+        format.opaque = true
+
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: pixelW,
+                                                            height: pixelH),
+                                               format: format)
+
+        return renderer.image { ctx in
+            let cg = ctx.cgContext
+
+            // 白底
+            cg.setFillColor(UIColor.white.cgColor)
+            cg.fill(CGRect(x: 0, y: 0, width: pixelW, height: pixelH))
+
+            // PDF 原点在左下角，UIKit 在左上角，翻转坐标系
+            cg.saveGState()
+            cg.translateBy(x: 0, y: pixelH)
+            cg.scaleBy(x: scale, y: -scale)
+            // draw(with:to:) 会自己处理页面旋转和裁剪
+            page.draw(with: .mediaBox, to: cg)
+            cg.restoreGState()
+        }
     }
 }
 
@@ -141,6 +188,7 @@ struct PDFImportSheet: View {
 
     // MARK: - 执行导入
 
+    @MainActor
     private func startImport() {
         guard pageCount > 0 else { return }
 
@@ -153,24 +201,28 @@ struct PDFImportSheet: View {
         let title = newBookTitle
         let targetID = targetBookID
 
-        Task {
+        // ⚠️ 必须 @MainActor：这里会写 @State（progress / finishedCount），
+        //    不在主线程写 @State 是未定义行为，会出各种诡异问题。
+        Task { @MainActor in
             var imported: [Page] = []
 
             for i in 0..<total {
                 let page: Page? = await withCheckedContinuation { cont in
                     DispatchQueue.global(qos: .userInitiated).async {
-                        guard let image = PDFImporter.renderPage(url: url,
-                                                                 index: i,
-                                                                 maxPixel: 2400),
-                              let data = image.jpegData(compressionQuality: 0.92),
-                              let name = try? FileStorage.saveImageData(
-                                  data,
-                                  preferredExtension: "jpg"
-                              ) else {
-                            cont.resume(returning: nil)
-                            return
+                        autoreleasepool {
+                            guard let image = PDFImporter.renderPage(url: url,
+                                                                     index: i,
+                                                                     maxPixel: 2400),
+                                  let data = image.jpegData(compressionQuality: 0.9),
+                                  let name = try? FileStorage.saveImageData(
+                                      data,
+                                      preferredExtension: "jpg"
+                                  ) else {
+                                cont.resume(returning: nil)
+                                return
+                            }
+                            cont.resume(returning: Page.image(fileName: name))
                         }
-                        cont.resume(returning: Page.image(fileName: name))
                     }
                 }
 
@@ -184,21 +236,20 @@ struct PDFImportSheet: View {
         }
     }
 
+    @MainActor
     private func finish(pages: [Page], title: String, targetID: UUID?) {
         isImporting = false
 
         guard !pages.isEmpty else {
-            errorText = "PDF 中没有可导入的页面"
+            errorText = "PDF 中没有可导入的页面（渲染失败）"
             return
         }
 
         if let targetID, let existing = library.book(id: targetID) {
-            // 追加到已有画册末尾
             var updated = existing
             updated.pages.append(contentsOf: pages)
             library.update(updated)
         } else {
-            // 新建画册
             let created = library.createBook(title: title.isEmpty
                                              ? "PDF 画册" : title)
             var updated = created
