@@ -1,21 +1,24 @@
 import SwiftUI
 import PencilKit
 
-// MARK: - 设置 + 自定义颜色
+// MARK: - 设置 + 自定义颜色 + 笔刷
 
 final class AppSettingsStore: ObservableObject {
     private static let settingsKey = "AppSettings.v1"
     private static let colorsKey = "SavedBrushColors.v1"
-    /// 自定义颜色最多保留多少个
+    private static let brushKey = "BrushPreset.v1"
     private static let maxSavedColors = 12
 
     @Published var settings: AppSettings {
         didSet { saveSettings() }
     }
 
-    /// 用户固定到笔刷栏的自定义颜色
     @Published var savedColors: [SavedBrushColor] = [] {
         didSet { saveColors() }
+    }
+
+    @Published var brushPreset: BrushPreset = BrushPreset() {
+        didSet { saveBrushPreset() }
     }
 
     init() {
@@ -30,11 +33,15 @@ final class AppSettingsStore: ObservableObject {
            let decoded = try? JSONDecoder().decode([SavedBrushColor].self, from: data) {
             savedColors = decoded
         }
+
+        if let data = UserDefaults.standard.data(forKey: Self.brushKey),
+           let decoded = try? JSONDecoder().decode(BrushPreset.self, from: data) {
+            brushPreset = decoded
+        }
     }
 
     // MARK: 自定义颜色
 
-    /// 把颜色固定到笔刷栏。已存在则不重复添加。
     func addColor(_ color: Color) {
         let hex = color.hexString
         guard !savedColors.contains(where: { $0.hex == hex }) else { return }
@@ -52,6 +59,22 @@ final class AppSettingsStore: ObservableObject {
         savedColors.remove(atOffsets: offsets)
     }
 
+    // MARK: 笔刷参数
+
+    func brushSettings(for kind: PenKind) -> BrushSettings {
+        brushPreset.settings(for: kind)
+    }
+
+    func updateBrush(_ value: BrushSettings, for kind: PenKind) {
+        var preset = brushPreset
+        preset.update(value, for: kind)
+        brushPreset = preset
+    }
+
+    func resetBrush(_ kind: PenKind) {
+        updateBrush(BrushSettings.standard(for: kind), for: kind)
+    }
+
     // MARK: 落盘
 
     private func saveSettings() {
@@ -62,6 +85,11 @@ final class AppSettingsStore: ObservableObject {
     private func saveColors() {
         guard let data = try? JSONEncoder().encode(savedColors) else { return }
         UserDefaults.standard.set(data, forKey: Self.colorsKey)
+    }
+
+    private func saveBrushPreset() {
+        guard let data = try? JSONEncoder().encode(brushPreset) else { return }
+        UserDefaults.standard.set(data, forKey: Self.brushKey)
     }
 }
 
@@ -129,7 +157,7 @@ final class LibraryStore: ObservableObject {
     }
 }
 
-// MARK: - 笔迹
+// MARK: - 旧版单层笔迹（保留兼容，图层启用后不再写入）
 
 final class DrawingStore: ObservableObject {
 
