@@ -179,7 +179,6 @@ struct BookReaderView: View {
                 }
             }
         }
-        // 左页 / 右页选择：用 alert（iPad 上一定居中显示）
         .alert(choiceTitle, isPresented: $showChoice) {
             ForEach(choiceIndices, id: \.self) { idx in
                 Button("第 \(idx + 1) 页") {
@@ -444,7 +443,7 @@ struct BookReaderView: View {
         }
     }
 
-    // MARK: - 翻页场景（翻动的那张纸放在裁剪层之外，可探出书框）
+    // MARK: - 翻页场景（翻动的纸在裁剪层之外，可探出书框；圆角加在纸自己身上）
 
     @ViewBuilder
     private func spreadOrSingleFlipping(book: Book, size: ReaderSize,
@@ -475,6 +474,7 @@ struct BookReaderView: View {
                                                    binding: book.bindingDirection)
 
             ZStack {
+                // ① 静止层：目标跨页，裁在书框里
                 ZStack {
                     SpreadCanvasView(book: book,
                                      spread: toSpread,
@@ -503,6 +503,8 @@ struct BookReaderView: View {
                         .stroke(PaperStyle.border, lineWidth: 0.5)
                 )
 
+                // ② 翻动的那张纸：不在裁剪层里，能探出书框；
+                //    圆角直接加在纸自己身上，所以右边那页不会变成直角。
                 FlipCard(front: pageOrPaper(book: book, index: fromSides.right,
                                             size: size),
                          back: pageOrPaper(book: book, index: toSides.left,
@@ -514,6 +516,8 @@ struct BookReaderView: View {
                          paperColor: PaperStyle.fill,
                          borderColor: PaperStyle.border)
                     .frame(width: pw, height: ph)
+                    .clipShape(RoundedRectangle(cornerRadius: bookCornerRadius,
+                                                style: .continuous))
                     .position(x: pw * 1.5, y: ph / 2)
             }
             .frame(width: pw * 2, height: ph)
@@ -562,6 +566,8 @@ struct BookReaderView: View {
                          paperColor: PaperStyle.fill,
                          borderColor: PaperStyle.border)
                     .frame(width: pw, height: ph)
+                    .clipShape(RoundedRectangle(cornerRadius: bookCornerRadius,
+                                                style: .continuous))
             }
             .frame(width: pw, height: ph)
         }
@@ -1559,7 +1565,6 @@ struct BookReaderView: View {
                     Label("从照片导入（每张占一页）", systemImage: "photo")
                 }
 
-                // 走原生文件选择器（不再用 SwiftUI 的 fileImporter）
                 Button {
                     importOccupiesSpread = false
                     presentDocumentPicker()
@@ -1656,7 +1661,6 @@ struct BookReaderView: View {
 
     // MARK: - 导入
 
-    /// 把选中的照片替换到指定页（不新建页）
     private func replacePhoto(_ items: [PhotosPickerItem], at index: Int) async {
         defer { photoItems = [] }
 
@@ -1785,10 +1789,6 @@ struct BookReaderView: View {
 }
 
 // MARK: - 原生文件选择器
-//
-// SwiftUI 的 .fileImporter 在 iPad 上时不时不回调（点了文件没反应）。
-// 这里直接用 UIDocumentPickerViewController，并用 asCopy: true，
-// 拿到的就是本地副本，不需要安全作用域那套，稳定得多。
 
 enum DocumentPickerService {
     static func present(types: [UTType],
