@@ -11,7 +11,7 @@ struct BookReaderView: View {
 
     let bookID: UUID
 
-    // MARK: 阅读位置（连续值，跟手翻页核心）
+    // MARK: 阅读位置（连续值）
     @State private var position: Double = 0
     @State private var viewMode: ViewMode = .spread
     @State private var didInitialize = false
@@ -19,6 +19,11 @@ struct BookReaderView: View {
     // MARK: 拖拽
     @State private var isDraggingPage = false
     @State private var dragStartPosition: Double = 0
+
+    /// 翻一页需要的滑动距离 = 跨页宽 × 这个系数。
+    /// 数值越小越灵敏。0.32 表示滑 1/3 个跨页宽就翻一页。
+    private let pageTurnDistanceFactor: CGFloat = 0.32
+    private let minPageTurnDistance: CGFloat = 140
 
     // MARK: 绘制
     @State private var isPenActive = false
@@ -58,6 +63,11 @@ struct BookReaderView: View {
     @State private var importOccupiesSpread = false
     @State private var importMessage: String? = nil
 
+    /// PDF 导入进度：nil = 没有在导入
+    @State private var pdfImportProgress: Double? = nil
+    @State private var pdfImportTotal = 0
+    @State private var pdfImportDone = 0
+
     private var book: Book? { library.book(id: bookID) }
     private var settings: AppSettings { settingsStore.settings }
     private var theme: ReaderTheme { settings.readerTheme }
@@ -75,6 +85,10 @@ struct BookReaderView: View {
                     Text("这本画册已被删除")
                         .foregroundStyle(.secondary)
                 }
+
+                if let progress = pdfImportProgress {
+                    importingOverlay(progress: progress)
+                }
             }
             .onAppear { initialize(container: geo.size) }
         }
@@ -90,7 +104,7 @@ struct BookReaderView: View {
             Task { await importFromPhotos(items) }
         }
         .fileImporter(isPresented: $showFileImporter,
-                      allowedContentTypes: [.image],
+                      allowedContentTypes: [.image, .pdf],
                       allowsMultipleSelection: true) { result in
             importFromFiles(result)
         }
@@ -141,6 +155,7 @@ struct BookReaderView: View {
                 }
             }
         }
+        .preferredColorScheme(.dark)
         .onChange(of: library.book(id: bookID)?.pages.count ?? 0) { _ in
             clampPosition()
         }
@@ -162,6 +177,30 @@ struct BookReaderView: View {
         } message: {
             Text(importMessage ?? "")
         }
+    }
+
+    // MARK: - PDF 导入进度
+
+    @ViewBuilder
+    private func importingOverlay(progress: Double) -> some View {
+        ZStack {
+            Color.black.opacity(0.55).ignoresSafeArea()
+
+            VStack(spacing: 16) {
+                ProgressView(value: progress)
+                    .frame(width: 220)
+                Text("正在导入 PDF")
+                    .font(.headline)
+                    .foregroundStyle(.white)
+                Text("\(pdfImportDone) / \(pdfImportTotal) 页")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.8))
+            }
+            .padding(28)
+            .background(.ultraThinMaterial,
+                        in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        }
+        .allowsHitTesting(true)
     }
 
     // MARK: - 主布局
@@ -202,16 +241,21 @@ struct BookReaderView: View {
         let maxPos = Double(max(count - 1, 0))
         let clamped = min(max(position, 0), maxPos)
         let from = Int(floor(clamped))
-        let frac = clamped - Double(from)
+        let frac = CGFloat(clamped - Double(from))
 
         ZStack {
             if book.pages.isEmpty {
                 emptyHint
-            } else if frac > 0.002, from + 1 < count {
+            } else if from + 1 < count && !(isPenActive && frac < 0.002) {
+                // ⚠️ 浏览时**永远**走这一套翻页结构（progress=0 时视觉上就等于静止页）。
+                //    不要在"静止页"和"翻页页"之间切换视图 —— 那种结构切换会把
+                //    卷页动画撕成一段淡入淡出，看起来就像"动画没了"。
+                //
+                //    编辑中且没在翻页时，退回静止场景，好让画布独占那一层笔迹。
                 spreadOrSingleFlipping(book: book,
                                        size: size,
                                        from: from,
-                                       progress: CGFloat(frac))
+                                       progress: frac)
             } else {
                 stableScene(book: book, size: size, index: from)
             }
@@ -229,13 +273,13 @@ struct BookReaderView: View {
                 .foregroundStyle(.secondary)
             Text("这本画册还没有页面")
                 .foregroundStyle(.secondary)
-            Text("点右上角 ⋯ 导入图片")
+            Text("点右上角 ⋯ 导入图片或 PDF")
                 .font(.footnote)
                 .foregroundStyle(.tertiary)
         }
     }
 
-    // MARK: - 静止场景
+    // MARK: - 静止场景（只在最后一跨页 / 编辑停笔时使用）
 
     @ViewBuilder
     private func stableScene(book: Book, size: ReaderSize, index: Int) -> some View {
@@ -298,9 +342,11 @@ struct BookReaderView: View {
     private func spreadOrSingleFlipping(book: Book, size: ReaderSize,
                                         from: Int, progress: CGFloat) -> some View {
         if viewMode == .spread {
-            spreadFlippingScene(book: book, size: size, from: from, progress: progress)
+            spreadFlippingScene(book: book, size: size,
+                                from: from, progress: progress)
         } else {
-            singleFlippingScene(book: book, size: size, from: from, progress: progress)
+            singleFlippingScene(book: book, size: size,
+                                from: from, progress: progress)
         }
     }
 
@@ -532,7 +578,6 @@ struct BookReaderView: View {
                                layerID: UUID) -> some View {
         let logical = DrawingGeometry.spreadSize(ratio: book.pageAspectRatio)
 
-        // 视口：双页模式 = 整个跨页；单页模式 = 半个跨页
         let isSingle = (viewMode == .single)
         let viewport = isSingle
             ? CGSize(width: logical.width / 2, height: logical.height)
@@ -648,6 +693,11 @@ struct BookReaderView: View {
         settings.edgeTapTurn && (!isPenActive || settings.pencilOnlyDrawMode)
     }
 
+    /// 翻一页需要滑动的距离
+    private func pageTurnDistance(size: ReaderSize) -> CGFloat {
+        max(size.containerWidth * pageTurnDistanceFactor, minPageTurnDistance)
+    }
+
     /// 跟手翻页：手指移多少，页面转多少；手指停，页面停。
     private func turnGesture(size: ReaderSize, book: Book) -> some Gesture {
         DragGesture(minimumDistance: 6)
@@ -664,9 +714,9 @@ struct BookReaderView: View {
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
                 }
 
-                let pageW = max(size.containerWidth, 80)
+                let turnDistance = pageTurnDistance(size: size)
                 let direction: Double = (book.bindingDirection == .leftToRight) ? -1 : 1
-                let delta = Double(dx / pageW) * direction
+                let delta = Double(dx / turnDistance) * direction
 
                 let count = readerUnitCount(book: book)
                 let maxPos = Double(max(count - 1, 0))
@@ -679,15 +729,16 @@ struct BookReaderView: View {
 
                 let count = readerUnitCount(book: book)
                 let maxPos = Double(max(count - 1, 0))
-                let pageW = max(size.containerWidth, 80)
+                let turnDistance = pageTurnDistance(size: size)
                 let direction: Double = (book.bindingDirection == .leftToRight) ? -1 : 1
 
-                let predictedDelta = Double(value.predictedEndTranslation.width / pageW)
-                    * direction
+                // 按手指速度预测终点：滑得快 → 多翻几页
+                let predictedDelta = Double(value.predictedEndTranslation.width
+                                            / turnDistance) * direction
                 let predicted = dragStartPosition + predictedDelta
                 let target = min(max(predicted.rounded(), 0), maxPos)
 
-                withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
                     position = target
                 }
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
@@ -702,12 +753,12 @@ struct BookReaderView: View {
                 let x = value.location.x
 
                 if x < w * 0.16 {
-                    withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                    withAnimation(.spring(response: 0.38, dampingFraction: 0.88)) {
                         position = max(position - 1, 0)
                     }
                 } else if x > w * 0.84 {
                     let maxPos = Double(max(readerUnitCount(book: book) - 1, 0))
-                    withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                    withAnimation(.spring(response: 0.38, dampingFraction: 0.88)) {
                         position = min(position + 1, maxPos)
                     }
                 }
@@ -784,7 +835,7 @@ struct BookReaderView: View {
 
         HStack(spacing: 14) {
             Button {
-                withAnimation(.spring(response: 0.30, dampingFraction: 0.86)) {
+                withAnimation(.spring(response: 0.34, dampingFraction: 0.88)) {
                     position = max(position - 1, 0)
                 }
             } label: {
@@ -794,7 +845,7 @@ struct BookReaderView: View {
             .disabled(current <= 0)
 
             Button {
-                withAnimation(.spring(response: 0.30, dampingFraction: 0.86)) {
+                withAnimation(.spring(response: 0.34, dampingFraction: 0.88)) {
                     position = min(position + 1, Double(max(count - 1, 0)))
                 }
             } label: {
@@ -877,9 +928,7 @@ struct BookReaderView: View {
                 }
 
                 rowDivider
-
                 eraserMenu
-
                 rowDivider
 
                 toolButton(isActive: false,
@@ -892,13 +941,10 @@ struct BookReaderView: View {
                 rowDivider
 
                 toolButton(isActive: false,
-                           systemImage: "square.3.layers.3d") {
-                    showLayers = true
-                }
+                           systemImage: "square.3.layers.3d") { showLayers = true }
 
                 rowDivider
 
-                // 精确缩放
                 toolButton(isActive: false, systemImage: "minus.magnifyingglass") {
                     zoomOutTrigger += 1
                 }
@@ -920,8 +966,7 @@ struct BookReaderView: View {
 
                 rowDivider
 
-                toolButton(isActive: false,
-                           systemImage: "chevron.down") {
+                toolButton(isActive: false, systemImage: "chevron.down") {
                     withAnimation(.spring(response: 0.30, dampingFraction: 0.82)) {
                         brushBarCollapsed = true
                     }
@@ -1170,7 +1215,7 @@ struct BookReaderView: View {
                     importOccupiesSpread = false
                     showFileImporter = true
                 } label: {
-                    Label("从文件导入（每张占一页）", systemImage: "folder")
+                    Label("从文件导入图片 / PDF", systemImage: "folder")
                 }
 
                 Divider()
@@ -1236,35 +1281,110 @@ struct BookReaderView: View {
         appendPages(newPages)
     }
 
+    /// 支持图片 + PDF 混选
     private func importFromFiles(_ result: Result<[URL], Error>) {
         switch result {
         case .failure(let error):
             importMessage = "导入失败：\(error.localizedDescription)"
 
         case .success(let urls):
-            var newPages: [Page] = []
+            var imagePages: [Page] = []
+            var pdfURLs: [URL] = []
+            let occupies = importOccupiesSpread
+
             for url in urls {
                 let accessing = url.startAccessingSecurityScopedResource()
                 defer { if accessing { url.stopAccessingSecurityScopedResource() } }
 
+                let ext = url.pathExtension.lowercased()
+
+                if ext == "pdf" {
+                    // 拷进沙盒，异步渲染时授权还在
+                    let dest = FileStorage.documents
+                        .appendingPathComponent("import-\(UUID().uuidString).pdf")
+                    if (try? FileManager.default.copyItem(at: url, to: dest)) != nil {
+                        pdfURLs.append(dest)
+                    }
+                    continue
+                }
+
                 guard let data = try? Data(contentsOf: url) else { continue }
-                let ext = url.pathExtension.isEmpty
+                let fileExt = ext.isEmpty
                     ? ImageFileType.fileExtension(for: data)
-                    : url.pathExtension.lowercased()
+                    : ext
 
                 if let name = try? FileStorage.saveImageData(data,
-                                                             preferredExtension: ext) {
-                    newPages.append(Page.image(fileName: name,
-                                               occupiesSpread: importOccupiesSpread))
+                                                             preferredExtension: fileExt) {
+                    imagePages.append(Page.image(fileName: name,
+                                                 occupiesSpread: occupies))
                 }
             }
 
-            if newPages.isEmpty {
-                importMessage = "没有导入任何图片"
-            } else {
-                appendPages(newPages)
+            if !imagePages.isEmpty {
+                appendPages(imagePages)
+            }
+
+            if !pdfURLs.isEmpty {
+                Task {
+                    for pdfURL in pdfURLs {
+                        await importPDFPages(url: pdfURL, occupies: occupies)
+                    }
+                }
+            }
+
+            if imagePages.isEmpty && pdfURLs.isEmpty {
+                importMessage = "没有导入任何内容"
             }
         }
+    }
+
+    /// 把一个 PDF 逐页渲染并追加到当前画册
+    private func importPDFPages(url: URL, occupies: Bool) async {
+        let total = PDFImporter.pageCount(url: url)
+        guard total > 0 else {
+            importMessage = "这个 PDF 没有可导入的页面"
+            return
+        }
+
+        pdfImportTotal = total
+        pdfImportDone = 0
+        pdfImportProgress = 0
+
+        var newPages: [Page] = []
+
+        for i in 0..<total {
+            let page: Page? = await withCheckedContinuation { cont in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    guard let image = PDFImporter.renderPage(url: url,
+                                                             index: i,
+                                                             maxPixel: 2400),
+                          let data = image.jpegData(compressionQuality: 0.92),
+                          let name = try? FileStorage.saveImageData(
+                              data,
+                              preferredExtension: "jpg"
+                          ) else {
+                        cont.resume(returning: nil)
+                        return
+                    }
+                    cont.resume(returning: Page.image(fileName: name,
+                                                     occupiesSpread: occupies))
+                }
+            }
+
+            if let page { newPages.append(page) }
+
+            pdfImportDone = i + 1
+            pdfImportProgress = Double(i + 1) / Double(total)
+        }
+
+        pdfImportProgress = nil
+
+        if newPages.isEmpty {
+            importMessage = "PDF 渲染失败"
+            return
+        }
+
+        appendPages(newPages)
     }
 
     private func appendPages(_ newPages: [Page]) {
