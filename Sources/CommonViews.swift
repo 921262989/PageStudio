@@ -3,7 +3,6 @@ import PencilKit
 
 // MARK: - 纸张
 
-/// 一页纸的底色与边缘质感。深色主题下边缘是压暗，浅色主题下也是轻微压暗。
 struct PaperView: View {
     let theme: ReaderTheme
 
@@ -11,7 +10,6 @@ struct PaperView: View {
         ZStack {
             theme.paperColor
 
-            // 纸张左右两侧的微妙明暗，模拟纸的厚度
             LinearGradient(
                 colors: [theme.paperEdgeShadow,
                          Color.clear,
@@ -101,13 +99,18 @@ struct StoredImage<Content: View>: View {
 
 // MARK: - 跨页笔迹的烘焙图
 
-/// 把某一跨页的笔迹渲染成一张透明叠图，覆在底图之上。
-/// 浏览模式下也要能看到自己的笔迹（旧版本这里是缺的）。
+/// 把某一跨页的笔迹渲染成一张透明叠图。
+///
+/// ⚠️ 只在「这一页不处于编辑状态」时使用。
+/// 编辑中的页如果同时显示烘焙图，会和画布上的实时笔迹重叠，
+/// 表现为「颜色变深、笔画变粗、几秒后变样」。
 struct SpreadDrawingImage: View {
     let book: Book
     let spreadIndex: Int
     let size: CGSize
     let revision: Int
+    /// 渲染倍率。2 能明显减少缩放后的锯齿与视觉变粗。
+    var renderScale: CGFloat = 2
 
     @State private var image: UIImage?
 
@@ -116,6 +119,7 @@ struct SpreadDrawingImage: View {
             if let image {
                 Image(uiImage: image)
                     .resizable()
+                    .interpolation(.high)
                     .frame(width: size.width, height: size.height)
             } else {
                 Color.clear
@@ -131,12 +135,14 @@ struct SpreadDrawingImage: View {
         let bookId = book.id
         let logical = DrawingGeometry.spreadSize(ratio: book.pageAspectRatio)
         let url = FileStorage.drawingURL(bookId: bookId, spreadIndex: spreadIndex)
+        let scale = renderScale
 
         let rendered = await Task.detached(priority: .userInitiated) { () -> UIImage? in
             guard let data = try? Data(contentsOf: url),
                   let drawing = try? PKDrawing(data: data),
                   !drawing.strokes.isEmpty else { return nil }
-            return drawing.image(from: CGRect(origin: .zero, size: logical), scale: 1)
+            return drawing.image(from: CGRect(origin: .zero, size: logical),
+                                 scale: scale)
         }.value
 
         image = rendered
