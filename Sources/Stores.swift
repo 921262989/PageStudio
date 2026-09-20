@@ -117,71 +117,6 @@ final class LibraryStore: ObservableObject {
         return book
     }
 
-    /// 复制一本画册：页面图片、封面图、笔迹、封面自选颜色、内页样式全都各来一份
-    @discardableResult
-    func duplicate(_ book: Book) -> Book {
-        var copy = book
-        copy.id = UUID()
-        copy.title = book.title + " 副本"
-
-        // 页面图片：复制成新文件，避免两本共用同一张图（删一本会连累另一本）
-        var newPages: [Page] = []
-        for page in book.pages {
-            var p = page
-            if let name = page.imageFileName {
-                let src = FileStorage.imageURL(named: name)
-                if let data = try? Data(contentsOf: src) {
-                    let ext = (name as NSString).pathExtension
-                    if let newName = try? FileStorage.saveImageData(
-                        data,
-                        preferredExtension: ext.isEmpty ? "jpg" : ext
-                    ) {
-                        p.imageFileName = newName
-                    }
-                }
-            }
-            newPages.append(p)
-        }
-        copy.pages = newPages
-
-        // 封面图
-        if let cover = book.customCoverImage {
-            let src = FileStorage.coverURL(named: cover)
-            if let data = try? Data(contentsOf: src) {
-                let ext = (cover as NSString).pathExtension
-                if let newName = try? FileStorage.saveCoverData(
-                    data,
-                    preferredExtension: ext.isEmpty ? "jpg" : ext
-                ) {
-                    copy.customCoverImage = newName
-                }
-            }
-        }
-
-        // 封面自选颜色
-        if let hex = CoverColorStore.hex(for: book.id) {
-            CoverColorStore.setHex(hex, for: copy.id)
-        }
-
-        // 内页样式
-        if let ruleData = UserDefaults.standard.data(forKey: PageRuleStore.key(for: book.id)) {
-            UserDefaults.standard.set(ruleData, forKey: PageRuleStore.key(for: copy.id))
-        }
-
-        // 笔迹目录
-        let srcDir = FileStorage.drawingsDirectory
-            .appendingPathComponent(book.id.uuidString, isDirectory: true)
-        let dstDir = FileStorage.drawingsDirectory
-            .appendingPathComponent(copy.id.uuidString, isDirectory: true)
-        if FileManager.default.fileExists(atPath: srcDir.path) {
-            try? FileManager.default.copyItem(at: srcDir, to: dstDir)
-        }
-
-        books.insert(copy, at: 0)
-        save()
-        return copy
-    }
-
     func update(_ book: Book) {
         var updated = book
         updated.updatedAt = Date()
@@ -198,12 +133,6 @@ final class LibraryStore: ObservableObject {
             }
         }
         FileStorage.deleteDrawings(bookId: book.id)
-
-        // 清掉这本书的附加设置
-        CoverColorStore.setHex(nil, for: book.id)
-        BookLock.setPassword(nil, for: book.id)
-        UserDefaults.standard.removeObject(forKey: PageRuleStore.key(for: book.id))
-
         books.removeAll { $0.id == book.id }
         save()
     }
@@ -228,7 +157,7 @@ final class LibraryStore: ObservableObject {
     }
 }
 
-// MARK: - 旧版单层笔迹（保留兼容）
+// MARK: - 旧版单层笔迹（保留兼容，图层启用后不再写入）
 
 final class DrawingStore: ObservableObject {
 
