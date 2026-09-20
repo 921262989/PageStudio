@@ -35,8 +35,60 @@ enum PenKind: String, CaseIterable, Identifiable, Codable {
         }
     }
 
-    var alpha: CGFloat { self == .marker ? 0.45 : 1.0 }
-    var widthMultiplier: CGFloat { self == .marker ? 2.4 : 1.0 }
+    /// 荧光笔需要透明叠加，其余不透明（透明度由 BrushSettings.opacity 控制）
+    var baseAlpha: CGFloat { self == .marker ? 1.0 : 1.0 }
+
+    /// 荧光笔的勾线宽度需要放大，否则太细
+    var widthMultiplier: CGFloat { self == .marker ? 1.6 : 1.0 }
+}
+
+// MARK: - 单支笔的设置
+
+struct BrushSettings: Codable, Equatable, Hashable {
+    /// 粗细（pt）
+    var width: Double
+    /// 不透明度 0.05 ~ 1.0
+    var opacity: Double
+
+    static func standard(for kind: PenKind) -> BrushSettings {
+        switch kind {
+        case .pen:    return BrushSettings(width: 10, opacity: 1.0)
+        case .marker: return BrushSettings(width: 30, opacity: 0.38)
+        case .pencil: return BrushSettings(width: 10, opacity: 1.0)
+        }
+    }
+
+    var clampedWidth: CGFloat {
+        CGFloat(min(max(width, 1), 60))
+    }
+
+    var clampedOpacity: CGFloat {
+        CGFloat(min(max(opacity, 0.05), 1.0))
+    }
+}
+
+// MARK: - 三支笔的设置集合
+
+struct BrushPreset: Codable, Equatable {
+    var pen: BrushSettings = BrushSettings.standard(for: .pen)
+    var marker: BrushSettings = BrushSettings.standard(for: .marker)
+    var pencil: BrushSettings = BrushSettings.standard(for: .pencil)
+
+    func settings(for kind: PenKind) -> BrushSettings {
+        switch kind {
+        case .pen:    return pen
+        case .marker: return marker
+        case .pencil: return pencil
+        }
+    }
+
+    mutating func update(_ value: BrushSettings, for kind: PenKind) {
+        switch kind {
+        case .pen:    pen = value
+        case .marker: marker = value
+        case .pencil: pencil = value
+        }
+    }
 }
 
 // MARK: - 当前工具
@@ -48,6 +100,11 @@ enum ActiveTool: Hashable {
     var isEraser: Bool {
         if case .eraser = self { return true }
         return false
+    }
+
+    var brushKind: PenKind? {
+        if case .brush(let k) = self { return k }
+        return nil
     }
 }
 
@@ -63,6 +120,13 @@ enum EraserKind: String, CaseIterable, Identifiable, Codable {
         switch self {
         case .precise: return "精确橡皮"
         case .vector:  return "矢量橡皮"
+        }
+    }
+
+    var shortName: String {
+        switch self {
+        case .precise: return "精确"
+        case .vector:  return "矢量"
         }
     }
 
@@ -88,48 +152,7 @@ enum EraserKind: String, CaseIterable, Identifiable, Codable {
     }
 }
 
-// MARK: - 笔的粗细（6 档）
-
-enum PenWidth: String, CaseIterable, Identifiable, Codable {
-    case hairline, thin, light, medium, bold, heavy
-
-    var id: String { rawValue }
-
-    var value: CGFloat {
-        switch self {
-        case .hairline: return 1.5
-        case .thin:     return 3
-        case .light:    return 6
-        case .medium:   return 11
-        case .bold:     return 18
-        case .heavy:    return 30
-        }
-    }
-
-    var displayName: String {
-        switch self {
-        case .hairline: return "极细"
-        case .thin:     return "细"
-        case .light:    return "偏细"
-        case .medium:   return "中"
-        case .bold:     return "粗"
-        case .heavy:    return "极粗"
-        }
-    }
-
-    var dotSize: CGFloat {
-        switch self {
-        case .hairline: return 5
-        case .thin:     return 8
-        case .light:    return 11
-        case .medium:   return 15
-        case .bold:     return 20
-        case .heavy:    return 24
-        }
-    }
-}
-
-// MARK: - 橡皮的粗细（4 档）
+// MARK: - 橡皮粗细
 
 enum EraserWidth: String, CaseIterable, Identifiable, Codable {
     case small, medium, large, huge
@@ -164,7 +187,7 @@ enum EraserWidth: String, CaseIterable, Identifiable, Codable {
     }
 }
 
-// MARK: - 预设颜色（精简到 6 个）
+// MARK: - 预设颜色（6 个）
 
 enum PenColorPreset: String, CaseIterable, Identifiable {
     case black
@@ -210,7 +233,7 @@ enum PenColorPreset: String, CaseIterable, Identifiable {
     }
 }
 
-// MARK: - 用户自定义颜色（可固定到笔刷栏）
+// MARK: - 用户自定义颜色
 
 struct SavedBrushColor: Identifiable, Codable, Hashable {
     var id: UUID = UUID()
