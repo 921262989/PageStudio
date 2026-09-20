@@ -44,7 +44,6 @@ struct BookReaderView: View {
     @State private var isPenActive = false
     @State private var activeTool: ActiveTool = .brush(.pen)
     @State private var penColor: Color = Color(white: 0.06)
-    @State private var draftColor: Color = Color(red: 0.1, green: 0.5, blue: 0.9)
     @State private var eraserKind: EraserKind = .precise
     @State private var eraserWidth: EraserWidth = .medium
 
@@ -215,35 +214,70 @@ struct BookReaderView: View {
 
     @ViewBuilder
     private func main(book: Book, container: CGSize) -> some View {
-        VStack(spacing: 0) {
-            GeometryReader { inner in
-                bookArea(book: book, available: inner.size)
-            }
+        ZStack(alignment: .bottom) {
+            VStack(spacing: 0) {
+                GeometryReader { inner in
+                    bookArea(book: book, available: inner.size)
+                }
 
-            if !isPenActive && !book.pages.isEmpty {
-                bottomBar(book: book)
+                if !isPenActive && !book.pages.isEmpty {
+                    bottomBar(book: book)
+                }
             }
-        }
-        .frame(width: container.width, height: container.height)
-        .overlay(alignment: .bottom) {
+            .frame(width: container.width, height: container.height)
+
             if isPenActive {
-                penToolbar
-                    .padding(.horizontal, 10)
-                    .padding(.bottom, 12)
+                VStack(spacing: 10) {
+                    if let item = activePopover {
+                        toolPanel(item)
+                            .transition(.scale(scale: 0.94, anchor: .bottom)
+                                .combined(with: .opacity))
+                    }
+
+                    penToolbar
+                        .padding(.horizontal, 10)
+                }
+                .padding(.bottom, 12)
             }
         }
-        .popover(item: $activePopover, arrowEdge: .bottom) { item in
-            switch item {
-            case .brush(let kind):
-                BrushSettingsPanel(settingsStore: settingsStore,
-                                   kind: kind,
-                                   color: penColor,
-                                   onClose: { activePopover = nil })
-            case .eraser:
-                EraserPanel(kind: $eraserKind,
-                            width: $eraserWidth,
-                            onClose: { activePopover = nil })
-            }
+        .animation(.spring(response: 0.28, dampingFraction: 0.86),
+                   value: activePopover)
+    }
+
+    /// 笔刷 / 橡皮设置面板。
+    ///
+    /// ⚠️ 以前这里用的是 .popover(item:)，而且挂在整屏那个大视图上。
+    /// 在 iPad 上 SwiftUI 拿不到锚点时，popover 会「静默不显示」——
+    /// 不报错、不崩溃，就是不弹出来。这就是「二次点击笔刷 / 橡皮没反应」
+    /// 以及「矢量橡皮像是没了」的真正原因。
+    /// 现在改成直接贴在工具栏上方的浮层卡片，不再依赖系统 popover。
+    @ViewBuilder
+    private func toolPanel(_ item: ToolPopover) -> some View {
+        switch item {
+        case .brush(let kind):
+            BrushSettingsPanel(settingsStore: settingsStore,
+                               kind: kind,
+                               color: penColor,
+                               onClose: { activePopover = nil })
+                .background(.regularMaterial,
+                            in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(Color.white.opacity(0.12), lineWidth: 0.5)
+                )
+                .shadow(color: .black.opacity(0.35), radius: 20, y: 8)
+
+        case .eraser:
+            EraserPanel(kind: $eraserKind,
+                        width: $eraserWidth,
+                        onClose: { activePopover = nil })
+                .background(.regularMaterial,
+                            in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(Color.white.opacity(0.12), lineWidth: 0.5)
+                )
+                .shadow(color: .black.opacity(0.35), radius: 20, y: 8)
         }
     }
 
@@ -347,18 +381,17 @@ struct BookReaderView: View {
                              drawingRevision: 0,
                              showDrawing: false,
                              theme: theme)
+                // 底图只是背景，不能吃触摸，否则双指手势会被它挡掉
+                .allowsHitTesting(false)
 
             ForEach(layers) { meta in
                 // ⚠️ 当前图层走实时画布时，也必须尊重「隐藏」和「透明度」。
-                //    之前漏了这一步：只有一层且它正好是当前图层时，
-                //    点眼睛、拖透明度全都看不出效果。
                 if editingThisUnit && meta.id == activeID {
                     if meta.isVisible {
                         drawingCanvas(book: book, unitIndex: index, size: size,
                                       spreadIndex: sIndex, layerID: meta.id)
                             .opacity(meta.clampedOpacity)
                     }
-                    // 隐藏时不渲染画布，也看不到笔迹
                 } else if meta.isVisible {
                     InkImageView(drawing: layerStore.drawing(bookId: book.id,
                                                              spreadIndex: sIndex,
@@ -366,6 +399,9 @@ struct BookReaderView: View {
                                  size: spreadSize,
                                  revision: layerStore.version,
                                  opacity: meta.opacity)
+                        // ⚠️ 关键：笔迹图盖在画布上面，如果不关掉命中测试，
+                        //    双指捏合、平移、吸色全都会被它吃掉
+                        .allowsHitTesting(false)
                 }
             }
         }
@@ -432,6 +468,7 @@ struct BookReaderView: View {
                                  showDrawing: false,
                                  theme: theme)
                     .frame(width: pw * 2, height: ph)
+                    .allowsHitTesting(false)
                     .overlay {
                         bakedLayers(book: book,
                                     spreadIndex: to,
@@ -476,6 +513,7 @@ struct BookReaderView: View {
                                drawingRevision: layerStore.version,
                                showDrawing: false,
                                theme: theme)
+                    .allowsHitTesting(false)
                     .overlay {
                         pageInkOverlay(book: book,
                                        pageIndex: to,
@@ -513,6 +551,8 @@ struct BookReaderView: View {
                 }
             }
         }
+        // 整层笔迹图都不参与触摸，避免挡住画布的手势
+        .allowsHitTesting(false)
     }
 
     /// 单页上的笔迹叠层。右半页要向左偏移半页宽，否则会显示成左页的笔迹。
@@ -530,6 +570,7 @@ struct BookReaderView: View {
         }
         .frame(width: size.pageWidth, height: size.pageHeight, alignment: .topLeading)
         .clipped()
+        .allowsHitTesting(false)
     }
 
     @ViewBuilder
@@ -545,9 +586,11 @@ struct BookReaderView: View {
                 .overlay {
                     pageInkOverlay(book: book, pageIndex: index, size: size)
                 }
+                .allowsHitTesting(false)
         } else {
             PaperView(theme: theme)
                 .frame(width: size.pageWidth, height: size.pageHeight)
+                .allowsHitTesting(false)
         }
     }
 
@@ -687,19 +730,14 @@ struct BookReaderView: View {
             },
             onDrawingStateChanged: { _ in },
             onPickColor: { picked in
-                // ⚠️ 必须异步：这个回调可能发生在 UIView 构建过程中，
-                //    同步写 @State 会触发 "Modifying state during view update" 崩溃
                 DispatchQueue.main.async {
                     penColor = picked
-                    draftColor = picked
                     if activeTool.isEraser {
                         activeTool = .brush(.pen)
                     }
                 }
             },
             onZoomChanged: { level in
-                // ⚠️ 必须异步 + 去重：scrollView 设置 zoomScale 时会立刻回调，
-                //    同步写 zoomLevel 就是「点编辑闪退」的元凶
                 DispatchQueue.main.async {
                     if abs(zoomLevel - level) > 0.005 {
                         zoomLevel = level
@@ -805,8 +843,7 @@ struct BookReaderView: View {
                 let target = min(max(predicted.rounded(), 0), maxPos)
 
                 if abs(target - dragStartPosition) > longJumpThreshold {
-                    // 一次跨太多页：不做逐页动画。
-                    // 逐页动画会让 SwiftUI 把中间每一页都渲染一遍 → 卡顿 + 内存飙升。
+                    // 一次跨太多页：不做逐页动画，避免逐帧渲染中间页
                     quickJump(to: target, book: book)
                 } else {
                     withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
@@ -905,7 +942,6 @@ struct BookReaderView: View {
     }
 
     /// 长距离跳页：先切到「白纸 + 页码」的降级画面，瞬间落位，等画面稳了再恢复真实渲染。
-    /// 这样从第 1 页一次跳到第 300 页，也只渲染两个画面，不卡、不爆内存。
     private func quickJump(to target: Double, book: Book) {
         let maxPos = Double(max(readerUnitCount(book: book) - 1, 0))
         let clamped = min(max(target, 0), maxPos)
@@ -967,7 +1003,7 @@ struct BookReaderView: View {
     }
 
     /// 整本书的进度条：按住横向拖动 = 直接跳到任意位置，一次能从第一页拖到最后一页。
-    /// 不管你甩得动甩不动，它一步到位。拖动中画面降级成白纸 + 页码，中间页面完全不渲染。
+    /// 拖动中画面降级成白纸 + 页码，中间页面完全不渲染。
     @ViewBuilder
     private func scrubber(book: Book) -> some View {
         let unitCount = max(readerUnitCount(book: book), 1)
@@ -1134,7 +1170,6 @@ struct BookReaderView: View {
                 ForEach(PenColorPreset.allCases) { preset in
                     colorDot(preset.color, isSelected: penColor == preset.color) {
                         penColor = preset.color
-                        draftColor = preset.color
                     }
                 }
 
@@ -1143,19 +1178,20 @@ struct BookReaderView: View {
                 ForEach(settingsStore.savedColors) { item in
                     colorDot(item.color, isSelected: penColor == item.color) {
                         penColor = item.color
-                        draftColor = item.color
                     }
                     .onLongPressGesture {
                         settingsStore.removeColor(item)
                     }
                 }
 
-                ColorPicker("", selection: $draftColor, supportsOpacity: false)
+                // ⚠️ 以前这里绑定的是 draftColor，再用 onChange 把值抄给 penColor。
+                //    问题：SwiftUI 每次重算界面都会重建这个 ColorPicker，
+                //    它会把自己的内部值回写给 draftColor → 触发 onChange →
+                //    在你不知情的时候把 penColor 覆盖掉（吸到浅色就「笔刷变淡」）。
+                //    现在直接绑 penColor，没有中间变量，颜色不会再被偷偷改掉。
+                ColorPicker("", selection: $penColor, supportsOpacity: false)
                     .labelsHidden()
                     .frame(width: 26, height: 26)
-                    .onChange(of: draftColor) { newValue in
-                        penColor = newValue
-                    }
 
                 Button {
                     settingsStore.addColor(penColor)
