@@ -302,27 +302,14 @@ struct BookReaderView: View {
             } else {
                 stableScene(book: book, size: size, index: from)
             }
-
-            // 书页上的翻页 / 边缘点击，全部交给「只认手指」的那一层。
-            // Apple Pencil 的触摸会穿透过去落到画布上，笔永远碰不到翻页。
-            FingerGestureLayer(
-                panEnabled: pagingEnabled && !fastJumpActive,
-                tapEnabled: edgeTapActive,
-                onPanChanged: { dx in
-                    turnDragChanged(dx, size: size, book: book)
-                },
-                onPanEnded: { dx, predicted in
-                    turnDragEnded(dx, predicted, size: size, book: book)
-                },
-                onTap: { point in
-                    handleEdgeTap(at: point.x,
-                                  width: available.width,
-                                  book: book)
-                }
-            )
         }
         .frame(width: available.width, height: available.height)
         .contentShape(Rectangle())
+        // 阅读模式（没有画布）：翻页用 SwiftUI 手势。
+        // 编辑模式：这两个手势内部会直接 return，翻页改由画布内部的
+        // UIKit 手势处理（那边能把 Apple Pencil 排除掉）。
+        .gesture(turnGesture(size: size, book: book))
+        .simultaneousGesture(edgeTapGesture(available: available, book: book))
     }
 
     @ViewBuilder
@@ -756,6 +743,18 @@ struct BookReaderView: View {
             threeFingerRedo: settings.threeFingerRedo,
             fourFingerClear: settings.fourFingerClear,
             longPressEyedropper: settings.longPressEyedropper,
+            // 手指翻页：交给画布内部的 UIKit 手势（能排除 Apple Pencil）
+            pagePanEnabled: pagingEnabled && !fastJumpActive,
+            pageTapEnabled: edgeTapActive,
+            onPagePanChanged: { dx in
+                turnDragChanged(dx, size: size, book: book)
+            },
+            onPagePanEnded: { dx, predicted in
+                turnDragEnded(dx, predicted, size: size, book: book)
+            },
+            onPageTap: { x in
+                handleEdgeTap(at: x, width: displayViewport.width, book: book)
+            },
             onDrawingChanged: { newDrawing in
                 layerStore.setDrawing(newDrawing,
                                       bookId: book.id,
@@ -850,14 +849,11 @@ struct BookReaderView: View {
 
     // MARK: - 手势
 
-    /// 手指能否拖动翻页。
+    /// 手指能否翻页。
     ///
-    /// 阅读模式：随时可以。
-    /// 「仅 Pencil」模式：手指可以 —— 笔只管画画，手指管翻页和手势。
-    /// 「手指 + Pencil」模式：不行，手指被画画占用了，翻页用底部进度条。
-    ///
-    /// 注意：Apple Pencil 已经被 FingerGestureLayer 用 allowedTouchTypes 排除，
-    /// 所以这里不需要再关心"笔正在画"这件事。
+    /// 阅读模式：可以。
+    /// 「仅 Pencil」模式：可以 —— 笔管画画，手指管翻页和手势。
+    /// 「手指 + Pencil」模式：不行，手指被画画占用了。
     private var pagingEnabled: Bool {
         if !isPenActive { return true }
         if settings.pencilOnlyDrawMode { return true }
@@ -872,7 +868,73 @@ struct BookReaderView: View {
         max(size.containerWidth * pageTurnDistanceFactor, minPageTurnDistance)
     }
 
-    /// 手指拖动中（相对起点的横向位移）。
+    /// 阅读模式下的翻页拖动。
+    /// 编辑模式下直接不响应 —— 那时候翻页由画布内部的 UIKit 手势接管，
+    /// 因为只有 UIKit 手势才能把 Apple Pencil 排除掉。
+    private func turnGesture(size: ReaderSize, book: Book) -> some Gesture {
+        DragGesture(minimumDistance: 6)
+            .onChanged { value in
+                guard !isPenActive else { return }
+                guard pagingEnabled, !fastJumpActive else { return }
+
+                let dx = value.translation.width
+                let dy = value.translation.height
+                guard abs(dx) > abs(dy) * 1.1 else { return }
+
+                if !isDraggingPage {
+                    isDraggingPage = true
+                    dragStartPosition = position
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                }
+
+                let turnDistance = pageTurnDistance(size: size)
+                let direction: Double = (book.bindingDirection == .leftToRight) ? -1 : 1
+                let delta = Double(dx / turnDistance) * direction
+
+                let count = readerUnitCount(book: book)
+                let maxPos = Double(max(count - 1, 0))
+
+                position = min(max(dragStartPosition + delta, 0), maxPos)
+            }
+            .onEnded { value in
+                guard !isPenActive else { return }
+                guard isDraggingPage else { return }
+                isDraggingPage = false
+
+                let count = readerUnitCount(book: book)
+                let maxPos = Double(max(count - 1, 0))
+                let turnDistance = pageTurnDistance(size: size)
+                let direction: Double = (book.bindingDirection == .leftToRight) ? -1 : 1
+
+                let predictedDelta = Double(value.predictedEndTranslation.width
+                                            / turnDistance) * direction
+                let predicted = dragStartPosition + predictedDelta
+                let target = min(max(predicted.rounded(), 0), maxPos)
+
+                if abs(target - dragStartPosition) > longJumpThreshold {
+                    quickJump(to: target, book: book)
+                } else {
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+                        position = target
+                    }
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                }
+            }
+    }
+
+    /// 阅读模式下的边缘点击翻页。
+    private func edgeTapGesture(available: CGSize, book: Book) -> some Gesture {
+        SpatialTapGesture()
+            .onEnded { value in
+                guard !isPenActive else { return }
+                guard edgeTapActive, !fastJumpActive else { return }
+                handleEdgeTap(at: value.location.x,
+                              width: available.width,
+                              book: book)
+            }
+    }
+
+    /// 手指拖动中（相对起点的横向位移）—— 画布内部手势回调过来。
     private func turnDragChanged(_ dx: CGFloat, size: ReaderSize, book: Book) {
         guard pagingEnabled, !fastJumpActive else { return }
 
@@ -892,7 +954,7 @@ struct BookReaderView: View {
         position = min(max(dragStartPosition + delta, 0), maxPos)
     }
 
-    /// 手指松手：按预测落点吸附。
+    /// 手指松手：按预测落点吸附 —— 画布内部手势回调过来。
     private func turnDragEnded(_ dx: CGFloat, _ predictedX: CGFloat,
                                size: ReaderSize, book: Book) {
         guard isDraggingPage else { return }
@@ -919,7 +981,7 @@ struct BookReaderView: View {
 
     /// 手指点击左右边缘 → 翻一页
     private func handleEdgeTap(at x: CGFloat, width: CGFloat, book: Book) {
-        guard edgeTapActive, !fastJumpActive else { return }
+        guard edgeTapActive, !fastJumpActive, width > 1 else { return }
 
         if x < width * 0.16 {
             withAnimation(.spring(response: 0.38, dampingFraction: 0.88)) {
