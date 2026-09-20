@@ -23,7 +23,7 @@ struct ScrubberView: View {
 
             ZStack(alignment: .leading) {
                 Capsule()
-                    .fill(Color.white.opacity(0.22))
+                    .fill(Color.white.opacity(0.20))
                     .frame(height: 5)
 
                 Capsule()
@@ -65,6 +65,7 @@ struct PageThumbnailView: View {
     let pageIndex: Int
     let width: CGFloat
     let height: CGFloat
+    let theme: ReaderTheme
 
     @State private var inkImage: UIImage?
 
@@ -76,7 +77,8 @@ struct PageThumbnailView: View {
         guard let s = SpreadLayout.spread(containingPage: pageIndex, in: book) else {
             return false
         }
-        return SpreadLayout.visualSides(of: s, binding: book.bindingDirection).right == pageIndex
+        return SpreadLayout.visualSides(of: s,
+                                        binding: book.bindingDirection).right == pageIndex
     }
 
     var body: some View {
@@ -88,7 +90,9 @@ struct PageThumbnailView: View {
                                pageWidth: width,
                                pageHeight: height,
                                drawingRevision: 0,
-                               showDrawing: false)
+                               showDrawing: false,
+                               theme: theme,
+                               bordered: false)
             }
             .overlay(alignment: .topLeading) {
                 if let inkImage {
@@ -99,10 +103,8 @@ struct PageThumbnailView: View {
                 }
             }
             .clipped()
-            .background(Color(white: 0.97))
-            .overlay(
-                Rectangle().stroke(Color.black.opacity(0.10), lineWidth: 1)
-            )
+            .background(theme.paperColor)
+            .overlay( Rectangle().stroke(theme.paperBorderColor, lineWidth: 0.5) )
             .task(id: "\(book.id.uuidString)-\(spreadIndex)") {
                 await loadInk()
             }
@@ -126,11 +128,12 @@ struct PageThumbnailView: View {
 struct ThumbnailPanelView: View {
     let book: Book
     let currentPageIndex: Int
+    let theme: ReaderTheme
     let onSelect: (Int) -> Void
 
     @Environment(\.dismiss) private var dismiss
 
-    private let columns = [GridItem(.adaptive(minimum: 120, maximum: 190), spacing: 14)]
+    private let columns = [GridItem(.adaptive(minimum: 118, maximum: 180), spacing: 14)]
 
     var body: some View {
         NavigationStack {
@@ -146,11 +149,13 @@ struct ThumbnailPanelView: View {
                                     PageThumbnailView(book: book,
                                                       pageIndex: idx,
                                                       width: 124,
-                                                      height: 124 * book.pageAspectRatio)
+                                                      height: 124 * book.pageAspectRatio,
+                                                      theme: theme)
                                     .clipShape(RoundedRectangle(cornerRadius: 4,
                                                                 style: .continuous))
                                     .overlay(
-                                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                        RoundedRectangle(cornerRadius: 4,
+                                                         style: .continuous)
                                             .stroke(idx == currentPageIndex
                                                     ? Color.accentColor
                                                     : Color.clear,
@@ -254,7 +259,9 @@ struct OutlinePanelView: View {
                 OutlineItemEditor(item: item,
                                   pageCount: book.pages.count,
                                   onSave: { newItem in
-                                      if let idx = items.firstIndex(where: { $0.id == newItem.id }) {
+                                      if let idx = items.firstIndex(where: {
+                                          $0.id == newItem.id
+                                      }) {
                                           items[idx] = newItem
                                           commit()
                                       }
@@ -385,10 +392,12 @@ struct OutlineItemEditor: View {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("保存") {
                         var updated = item
-                        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let trimmed = title
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
                         updated.title = trimmed.isEmpty ? "未命名条目" : trimmed
                         updated.level = level
-                        updated.pageIndex = min(max(pageIndex, 0), max(pageCount - 1, 0))
+                        updated.pageIndex = min(max(pageIndex, 0),
+                                                max(pageCount - 1, 0))
                         onSave(updated)
                         dismiss()
                     }
