@@ -1,99 +1,5 @@
 import SwiftUI
 
-// MARK: - 通用小额视图
-
-struct PaperView: View {
-    var body: some View {
-        ZStack {
-            Color(red: 0.99, green: 0.985, blue: 0.97)
-            LinearGradient(
-                colors: [Color.black.opacity(0.05),
-                         Color.clear,
-                         Color.clear,
-                         Color.black.opacity(0.05)],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-        }
-    }
-}
-
-struct SpineView: View {
-    var body: some View {
-        LinearGradient(
-            colors: [.clear,
-                     .black.opacity(0.10),
-                     .black.opacity(0.22),
-                     .black.opacity(0.10),
-                     .clear],
-            startPoint: .leading,
-            endPoint: .trailing
-        )
-        .frame(width: 48)
-        .allowsHitTesting(false)
-    }
-}
-
-struct ReaderBackground: View {
-    var body: some View {
-        LinearGradient(
-            colors: [Color(white: 0.18), Color(white: 0.08)],
-            startPoint: .top,
-            endPoint: .bottom
-        )
-        .ignoresSafeArea()
-    }
-}
-
-/// 从磁盘按需加载图片的容器
-struct StoredImage<Content: View>: View {
-    let name: String
-    let maxPixel: CGFloat
-    private let content: (Image) -> Content
-
-    @State private var image: UIImage? = nil
-
-    init(name: String,
-         maxPixel: CGFloat = 2048,
-         @ViewBuilder content: @escaping (Image) -> Content) {
-        self.name = name
-        self.maxPixel = maxPixel
-        self.content = content
-    }
-
-    var body: some View {
-        Group {
-            if let image {
-                content(Image(uiImage: image))
-            } else {
-                Color.clear
-            }
-        }
-        .task(id: name) {
-            await load()
-        }
-    }
-
-    private func load() async {
-        if let cached = ImageLoader.cache.object(forKey: name as NSString) {
-            image = cached
-            return
-        }
-        let url = FileStorage.imageURL(named: name)
-        let pixel = maxPixel
-        let decoded = await Task.detached(priority: .userInitiated) {
-            ImageLoader.downsample(url: url, maxPixel: pixel)
-        }.value
-
-        if let decoded {
-            ImageLoader.cache.setObject(decoded, forKey: name as NSString)
-        }
-        image = decoded
-    }
-}
-
-// MARK: - 书架
-
 struct LibraryView: View {
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var settingsStore: AppSettingsStore
@@ -103,8 +9,9 @@ struct LibraryView: View {
     @State private var bookToRename: Book?
     @State private var renameTitle = ""
     @State private var showSettings = false
+    @State private var coverEditingBook: Book?
 
-    private let columns = [GridItem(.adaptive(minimum: 170, maximum: 240), spacing: 24)]
+    private let columns = [GridItem(.adaptive(minimum: 152, maximum: 220), spacing: 26)]
 
     var body: some View {
         NavigationStack {
@@ -118,9 +25,7 @@ struct LibraryView: View {
             .navigationTitle("我的书架")
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Button {
-                        showSettings = true
-                    } label: {
+                    Button { showSettings = true } label: {
                         Image(systemName: "gearshape")
                     }
                 }
@@ -140,21 +45,36 @@ struct LibraryView: View {
                 SettingsView()
                     .environmentObject(settingsStore)
             }
+            .sheet(item: $coverEditingBook) { book in
+                CoverPickerView(
+                    initialStyle: book.coverStyle,
+                    hasCustomImage: book.customCoverImage != nil,
+                    onStyle: { style in
+                        var updated = book
+                        updated.coverStyle = style
+                        library.update(updated)
+                    },
+                    onCustomImage: { name in
+                        var updated = book
+                        updated.customCoverImage = name
+                        library.update(updated)
+                    }
+                )
+            }
             .alert("新建画册", isPresented: $showNewBookAlert) {
                 TextField("画册名称", text: $newBookTitle)
                 Button("取消", role: .cancel) {}
-                Button("创建") {
-                    library.createBook(title: newBookTitle)
-                }
+                Button("创建") { library.createBook(title: newBookTitle) }
             }
             .alert("重命名画册", isPresented: renameAlertBinding) {
                 TextField("画册名称", text: $renameTitle)
                 Button("取消", role: .cancel) { bookToRename = nil }
                 Button("保存") {
-                    if var book = bookToRename {
-                        let trimmed = renameTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !trimmed.isEmpty { book.title = trimmed }
-                        library.update(book)
+                    if var b = bookToRename {
+                        let trimmed = renameTitle
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !trimmed.isEmpty { b.title = trimmed }
+                        library.update(b)
                     }
                     bookToRename = nil
                 }
@@ -171,13 +91,18 @@ struct LibraryView: View {
 
     private var bookGrid: some View {
         ScrollView {
-            LazyVGrid(columns: columns, spacing: 28) {
+            LazyVGrid(columns: columns, spacing: 30) {
                 ForEach(library.books) { book in
                     NavigationLink(value: book.id) {
                         BookCoverCell(book: book)
                     }
                     .buttonStyle(.plain)
                     .contextMenu {
+                        Button {
+                            coverEditingBook = book
+                        } label: {
+                            Label("更换封面", systemImage: "paintpalette")
+                        }
                         Button {
                             bookToRename = book
                             renameTitle = book.title
@@ -218,35 +143,23 @@ struct BookCoverCell: View {
     let book: Book
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color(white: 0.95))
-                .frame(height: 220)
-                .overlay {
-                    if let name = book.coverImageFileName {
-                        StoredImage(name: name) { image in
-                            image.resizable().scaledToFill()
-                        }
-                    } else {
-                        Image(systemName: "book.closed")
-                            .font(.system(size: 34))
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(Color.black.opacity(0.08), lineWidth: 1)
-                )
-                .shadow(color: .black.opacity(0.15), radius: 6, x: 0, y: 3)
+        VStack(alignment: .leading, spacing: 10) {
+            NotebookCoverView(book: book)
 
             Text(book.title)
                 .font(.headline)
                 .lineLimit(1)
+                .foregroundStyle(.primary)
 
-            Text("\(book.pages.count) 页")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                Text("\(book.pages.count) 页")
+                if !book.outline.isEmpty {
+                    Text("·")
+                    Text("\(book.outline.count) 条目")
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
         }
     }
 }
