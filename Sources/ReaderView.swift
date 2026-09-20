@@ -25,19 +25,16 @@ struct BookReaderView: View {
 
     let bookID: UUID
 
-    // 阅读位置（连续值）
     @State private var position: Double = 0
     @State private var viewMode: ViewMode = .spread
     @State private var didInitialize = false
 
-    // 拖拽
     @State private var isDraggingPage = false
     @State private var dragStartPosition: Double = 0
 
     private let pageTurnDistanceFactor: CGFloat = 0.32
     private let minPageTurnDistance: CGFloat = 140
 
-    // 绘制
     @State private var isPenActive = false
     @State private var activeTool: ActiveTool = .brush(.pen)
     @State private var penColor: Color = Color(white: 0.06)
@@ -53,15 +50,12 @@ struct BookReaderView: View {
     @State private var zoomOutTrigger = 0
     @State private var zoomLevel: CGFloat = 1
 
-    /// 工具弹窗（笔刷设置 / 橡皮设置共用）
     @State private var activePopover: ToolPopover?
     @State private var brushBarCollapsed = false
     @State private var saveColorPulse = false
 
-    // 图层
     @State private var activeLayerIDs: [String: UUID] = [:]
 
-    // 面板
     @State private var showThumbnails = false
     @State private var showOutline = false
     @State private var showLayers = false
@@ -69,7 +63,6 @@ struct BookReaderView: View {
 
     @State private var didAutoAppend = false
 
-    // 导入
     @State private var showPhotoPicker = false
     @State private var showFileImporter = false
     @State private var photoItems: [PhotosPickerItem] = []
@@ -192,8 +185,6 @@ struct BookReaderView: View {
         }
     }
 
-    // MARK: - PDF 导入进度
-
     @ViewBuilder
     private func importingOverlay(progress: Double) -> some View {
         ZStack {
@@ -266,8 +257,6 @@ struct BookReaderView: View {
             if book.pages.isEmpty {
                 emptyHint
             } else if from + 1 < count && !(isPenActive && frac < 0.002) {
-                // 浏览时永远走同一套翻页结构，progress=0 视觉上就等于静止页。
-                // 不要在"静止/翻页"之间切视图 —— 那会把动画撕成淡入淡出。
                 spreadOrSingleFlipping(book: book,
                                        size: size,
                                        from: from,
@@ -315,9 +304,16 @@ struct BookReaderView: View {
                              theme: theme)
 
             ForEach(layers) { meta in
+                // ⚠️ 当前图层走实时画布时，也必须尊重「隐藏」和「透明度」。
+                //    之前漏了这一步：只有一层且它正好是当前图层时，
+                //    点眼睛、拖透明度全都看不出效果。
                 if editingThisUnit && meta.id == activeID {
-                    drawingCanvas(book: book, unitIndex: index, size: size,
-                                  spreadIndex: sIndex, layerID: meta.id)
+                    if meta.isVisible {
+                        drawingCanvas(book: book, unitIndex: index, size: size,
+                                      spreadIndex: sIndex, layerID: meta.id)
+                            .opacity(meta.clampedOpacity)
+                    }
+                    // 隐藏时不渲染画布，也看不到笔迹
                 } else if meta.isVisible {
                     InkImageView(drawing: layerStore.drawing(bookId: book.id,
                                                              spreadIndex: sIndex,
@@ -436,12 +432,9 @@ struct BookReaderView: View {
                                showDrawing: false,
                                theme: theme)
                     .overlay {
-                        bakedLayers(book: book,
-                                    spreadIndex: SpreadLayout.spreadIndex(
-                                        containingPage: to, in: book),
-                                    size: CGSize(width: pw * 2, height: ph))
-                            .frame(width: pw, height: ph)
-                            .clipped()
+                        pageInkOverlay(book: book,
+                                       pageIndex: to,
+                                       size: size)
                     }
 
                 FlipCard(front: pageOrPaper(book: book, index: from, size: size),
@@ -477,6 +470,23 @@ struct BookReaderView: View {
         }
     }
 
+    /// 单页上的笔迹叠层。右半页要向左偏移半页宽，否则会显示成左页的笔迹。
+    @ViewBuilder
+    private func pageInkOverlay(book: Book, pageIndex: Int, size: ReaderSize) -> some View {
+        let sIndex = SpreadLayout.spreadIndex(containingPage: pageIndex, in: book)
+        let isRight = isRightPage(unitIndex: pageIndex, book: book)
+
+        ZStack(alignment: .topLeading) {
+            bakedLayers(book: book,
+                        spreadIndex: sIndex,
+                        size: CGSize(width: size.pageWidth * 2,
+                                     height: size.pageHeight))
+                .offset(x: isRight ? -size.pageWidth : 0)
+        }
+        .frame(width: size.pageWidth, height: size.pageHeight, alignment: .topLeading)
+        .clipped()
+    }
+
     @ViewBuilder
     private func pageOrPaper(book: Book, index: Int?, size: ReaderSize) -> some View {
         if let index, book.pages.indices.contains(index) {
@@ -488,13 +498,7 @@ struct BookReaderView: View {
                            showDrawing: false,
                            theme: theme)
                 .overlay {
-                    bakedLayers(book: book,
-                                spreadIndex: SpreadLayout.spreadIndex(
-                                    containingPage: index, in: book),
-                                size: CGSize(width: size.pageWidth * 2,
-                                             height: size.pageHeight))
-                        .frame(width: size.pageWidth, height: size.pageHeight)
-                        .clipped()
+                    pageInkOverlay(book: book, pageIndex: index, size: size)
                 }
         } else {
             PaperView(theme: theme)
@@ -588,9 +592,6 @@ struct BookReaderView: View {
 
     // MARK: - 绘制画布
 
-    /// ⚠️ 不再用 SwiftUI 的 scaleEffect 缩小画布 ——
-    ///    那会让 UIView 的触摸坐标转发错乱，双指捏合直接失效。
-    ///    现在把「屏幕尺寸」交给 UIScrollView，缩放全部由它原生处理。
     @ViewBuilder
     private func drawingCanvas(book: Book, unitIndex index: Int,
                                size: ReaderSize, spreadIndex: Int,
@@ -929,9 +930,7 @@ struct BookReaderView: View {
 
     private var expandedBar: some View {
         VStack(spacing: 8) {
-            // 第一行：工具 + 操作
             toolbarRow {
-                // 笔刷：第一次点选中，已是当前笔再点一次 → 弹出设置
                 ForEach(PenKind.allCases) { kind in
                     toolButton(isActive: activeTool == .brush(kind),
                                systemImage: kind.systemImage) {
@@ -947,7 +946,6 @@ struct BookReaderView: View {
 
                 rowDivider
 
-                // 橡皮：第一次点选中，已是橡皮再点一次 → 弹出类型/大小
                 toolButton(isActive: activeTool.isEraser,
                            systemImage: eraserKind.systemImage) {
                     if activeTool.isEraser {
@@ -1002,7 +1000,6 @@ struct BookReaderView: View {
                 }
             }
 
-            // 第二行：颜色 + 粗细
             toolbarRow {
                 ForEach(PenColorPreset.allCases) { preset in
                     colorDot(preset.color, isSelected: penColor == preset.color) {
@@ -1056,7 +1053,6 @@ struct BookReaderView: View {
 
                 rowDivider
 
-                // 粗细快捷点
                 ForEach(quickWidths, id: \.self) { w in
                     Button {
                         var s = settingsStore.brushSettings(for: activeBrushKind)
