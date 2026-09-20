@@ -21,6 +21,12 @@ struct LibraryView: View {
     // 图片批量导入
     @State private var showPhotoImport = false
 
+    // 翻开动画
+    @State private var openingBook: Book?
+    @State private var openProgress: CGFloat = 0
+    @State private var overlayOpacity: Double = 1
+    @State private var isOpening = false
+
     var body: some View {
         NavigationStack(path: $path) {
             Group {
@@ -68,8 +74,14 @@ struct LibraryView: View {
                 BookReaderView(bookID: id)
             }
         }
-        // ⚠️ 所有呈现类修饰符都挂在 NavigationStack 最外层，
-        //    挂在里层（Group 上）会导致 fileImporter 静默失败。
+        .overlay {
+            if let openingBook {
+                BookOpeningOverlay(book: openingBook, progress: openProgress)
+                    .opacity(overlayOpacity)
+                    .allowsHitTesting(false)
+            }
+        }
+        // ⚠️ 呈现类修饰符挂在 NavigationStack 最外层
         .fileImporter(isPresented: $showPDFPicker,
                       allowedContentTypes: [.pdf],
                       allowsMultipleSelection: false) { result in
@@ -129,7 +141,6 @@ struct LibraryView: View {
         }
     }
 
-    /// 菜单项点击后延迟一点点再触发，避免和菜单收起动画打架
     private func delayed(_ action: @escaping () -> Void) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: action)
     }
@@ -148,7 +159,7 @@ struct LibraryView: View {
             BookCarousel(books: library.books,
                          index: $carouselIndex,
                          onOpen: { book in
-                             path.append(book.id)
+                             openBook(book)
                          },
                          onCover: { book in
                              coverEditingBook = book
@@ -218,6 +229,40 @@ struct LibraryView: View {
         }
     }
 
+    // MARK: - 翻开动画
+
+    private func openBook(_ book: Book) {
+        guard !isOpening else { return }
+        isOpening = true
+
+        openingBook = book
+        openProgress = 0
+        overlayOpacity = 1
+
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+
+        // 封面绕左边缘翻开
+        withAnimation(.easeInOut(duration: 0.78)) {
+            openProgress = 1
+        }
+
+        // 翻开到 92% 时推入阅读器
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.72) {
+            path.append(book.id)
+            withAnimation(.easeOut(duration: 0.20)) {
+                overlayOpacity = 0
+            }
+        }
+
+        // 收尾
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            openingBook = nil
+            openProgress = 0
+            overlayOpacity = 1
+            isOpening = false
+        }
+    }
+
     // MARK: - PDF 选择
 
     private func handlePDFSelection(_ result: Result<[URL], Error>) {
@@ -231,7 +276,6 @@ struct LibraryView: View {
             let accessing = url.startAccessingSecurityScopedResource()
             defer { if accessing { url.stopAccessingSecurityScopedResource() } }
 
-            // 拷进沙盒。文件选择器给的是临时授权，异步渲染时可能已失效。
             let dest = FileStorage.documents.appendingPathComponent("import-temp.pdf")
             try? FileManager.default.removeItem(at: dest)
 
@@ -242,10 +286,73 @@ struct LibraryView: View {
                 target = url
             }
 
-            // 再延迟一下，避免和文件选择器的收起动画打架
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                 pdfFileRef = PDFFileRef(url: target)
             }
         }
+    }
+}
+
+// MARK: - 翻开动画视图
+
+struct BookOpeningOverlay: View {
+    let book: Book
+    let progress: CGFloat
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = min(geo.size.width * 0.62, 520)
+            let h = w * 1.38
+
+            ZStack {
+                // 压暗背景
+                Color.black
+                    .opacity(0.55 * Double(min(progress * 1.4, 1)))
+                    .ignoresSafeArea()
+
+                ZStack {
+                    // 里面露出的第一页
+                    firstPage(width: w, height: h)
+
+                    // 封面绕左边缘翻开
+                    FlipCard(front: AnyView(NotebookCoverView(book: book, width: w)),
+                             back: AnyView(backSide(width: w, height: h)),
+                             angle: -178 * Double(progress),
+                             anchor: .leading,
+                             perspective: 0.30,
+                             dimming: 0.08,
+                             paperColor: PaperStyle.fill,
+                             borderColor: PaperStyle.border)
+                        .frame(width: w, height: h)
+                }
+                .scaleEffect(1 + 0.07 * progress)
+                .offset(y: -24 * progress)
+                .shadow(color: .black.opacity(0.5), radius: 30, y: 14)
+            }
+            .frame(width: geo.size.width, height: geo.size.height)
+        }
+    }
+
+    private func firstPage(width: CGFloat, height: CGFloat) -> some View {
+        let page = book.pages.first ?? Page.blank()
+        return PageContentView(page: page,
+                               size: CGSize(width: width, height: height),
+                               theme: .classic)
+            .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
+    }
+
+    private func backSide(width: CGFloat, height: CGFloat) -> some View {
+        ZStack {
+            PaperStyle.fill
+
+            LinearGradient(
+                colors: [Color.black.opacity(0.06),
+                         Color.clear,
+                         Color.black.opacity(0.06)],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+        }
+        .frame(width: width, height: height)
     }
 }
