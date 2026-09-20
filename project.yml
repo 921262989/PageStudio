@@ -24,10 +24,18 @@ targets:
         MARKETING_VERSION: "1.0"
         CURRENT_PROJECT_VERSION: "1"
         TARGETED_DEVICE_FAMILY: "2"
-        INFOPLIST_KEY_CFBundleDisplayName: PageStudio
+
+        # 桌面图标下面显示的名字 —— 想改就改这一行（中文也行）
+        INFOPLIST_KEY_CFBundleDisplayName: 我的画册
+
+        # 应用图标：指向 Assets.xcassets 里的 AppIcon 图集
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: ""
+
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_NSPhotoLibraryUsageDescription: 需要访问相册以导入图片到画册中
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
+
         CODE_SIGN_IDENTITY: ""
         CODE_SIGNING_REQUIRED: NO
         CODE_SIGNING_ALLOWED: NO
