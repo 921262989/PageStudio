@@ -9,6 +9,7 @@ struct BookCarousel: View {
     let onOpen: (Book) -> Void
     let onCover: (Book) -> Void
     let onRename: (Book) -> Void
+    let onPageStyle: (Book) -> Void
     let onDelete: (Book) -> Void
 
     @State private var dragOffset: CGFloat = 0
@@ -81,6 +82,11 @@ struct BookCarousel: View {
                     onCover(book)
                 } label: {
                     Label("更换封面", systemImage: "paintpalette")
+                }
+                Button {
+                    onPageStyle(book)
+                } label: {
+                    Label("内页样式", systemImage: "square.grid.3x3")
                 }
                 Button {
                     onRename(book)
