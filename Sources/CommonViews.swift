@@ -33,9 +33,34 @@ final class InkImageCache {
 
     func store(_ image: UIImage, forKey key: String) {
         let pixels = image.size.width * image.scale * image.size.height * image.scale
-        let cost = Int(pixels * 4)
-        cache.setObject(image, forKey: key as NSString, cost: cost)
+
+        // 尺寸异常就不要 cost 了，否则 Int() 转换会崩
+        guard pixels.isFinite, pixels > 0, pixels < 200_000_000 else {
+            cache.setObject(image, forKey: key as NSString)
+            return
+        }
+        cache.setObject(image, forKey: key as NSString, cost: Int(pixels * 4))
     }
+}
+
+// MARK: - 安全的数值转换
+
+/// ⚠️ 空 PKDrawing 的 bounds 是 CGRect.null（origin 为无穷大）。
+/// 直接把无穷大转 Int 会触发运行时致命错误，所以这里统一兜一层。
+private func safeHundredths(_ value: CGFloat) -> Int {
+    guard value.isFinite else { return 0 }
+    let scaled = value * 100
+    guard scaled.isFinite,
+          scaled > CGFloat(Int.min),
+          scaled < CGFloat(Int.max) else { return 0 }
+    return Int(scaled.rounded())
+}
+
+private func safeInt(_ value: CGFloat) -> Int {
+    guard value.isFinite,
+          value > CGFloat(Int.min),
+          value < CGFloat(Int.max) else { return 0 }
+    return Int(value.rounded())
 }
 
 // MARK: - 纸张
@@ -167,7 +192,7 @@ struct InkImageView: View {
     var body: some View {
         let key = cacheKey
 
-        // ⚠️ 这里是「翻页闪一下」的关键修复：
+        // ⚠️ 「翻页闪一下」的关键修复：
         //    先看内存里有没有现成的位图，有就【同步】取出来直接画。
         //    以前是「先画一帧空白，等异步渲染完再替换」，那一帧空白就是你看到的闪。
         let shown: UIImage? = (imageKey == key ? image : nil)
@@ -195,29 +220,36 @@ struct InkImageView: View {
     /// 位图小 3~4 倍，渲染也快，闪的时间也就没了。
     private var effectiveScale: CGFloat {
         if let renderScale { return renderScale }
-        guard size.height > 1 else { return 1 }
+        guard size.height.isFinite, size.height > 1 else { return 1 }
         let raw = size.height / DrawingGeometry.logicalPageHeight * 2
         return min(max(raw, 0.75), 2.5)
     }
 
-    /// 缓存键。
-    /// PKDrawing 是值类型（struct），不能用 ObjectIdentifier，
-    /// 所以这里用「笔画数 + 总锚点数 + 包围盒 + 渲染尺寸」拼一个内容指纹。
-    /// 同一个跨页在同一内容下翻来翻去，就能命中同一个位图。
+    /// 缓存键：笔画数 + 锚点数 + 包围盒 + 渲染尺寸。
+    ///
+    /// ⚠️ 空 PKDrawing 的 bounds 是 CGRect.null（origin 为无穷大），
+    ///    直接转 Int 会崩，所以整段都不碰它。
     private var cacheKey: String {
-        let logical = DrawingGeometry.spreadSize(ratio: 1.414)
+        let logicalW = safeInt(DrawingGeometry.spreadSize(ratio: 1.414).width)
+        let logicalH = safeInt(DrawingGeometry.logicalPageHeight)
         let scale = effectiveScale
+        let base = "\(logicalW)x\(logicalH)-\(Int(scale * 100))"
+
+        // 这一页一笔都没画：给一个稳定的空 key，不计算 bounds
+        guard !drawing.strokes.isEmpty else {
+            return "ink-empty-\(base)"
+        }
+
         let b = drawing.bounds
         let strokeCount = drawing.strokes.count
         let anchorCount = drawing.strokes.reduce(0) { $0 + $1.path.count }
 
-        let fx = Int(b.origin.x * 100)
-        let fy = Int(b.origin.y * 100)
-        let fw = Int(b.width * 100)
-        let fh = Int(b.height * 100)
+        let box = "\(safeHundredths(b.origin.x))"
+            + "_\(safeHundredths(b.origin.y))"
+            + "_\(safeHundredths(b.width))"
+            + "_\(safeHundredths(b.height))"
 
-        return "ink-\(strokeCount)-\(anchorCount)-\(fx)-\(fy)-\(fw)-\(fh)"
-            + "-\(Int(logical.width))x\(Int(logical.height))-\(Int(scale * 100))"
+        return "ink-\(strokeCount)-\(anchorCount)-\(box)-\(base)"
     }
 
     private func render(key: String) async {
@@ -293,7 +325,9 @@ struct SpreadDrawingImage: View {
     }
 
     private var cacheKey: String {
-        "spread-\(book.id.uuidString)-\(spreadIndex)-\(Int(size.width))x\(Int(size.height))-\(Int(renderScale * 100))"
+        "spread-\(book.id.uuidString)-\(spreadIndex)"
+            + "-\(safeInt(size.width))x\(safeInt(size.height))"
+            + "-\(Int(renderScale * 100))"
     }
 
     private func load(key: String) async {
