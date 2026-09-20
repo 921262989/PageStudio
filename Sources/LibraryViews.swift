@@ -317,10 +317,7 @@ struct LibraryView: View {
                                          theme: theme)
             busyText = nil
 
-            guard let url else {
-                busyText = nil
-                return
-            }
+            guard let url else { return }
             exportURL = url
             showExportShare = true
         }
@@ -455,7 +452,9 @@ struct BookEditView: View {
                     HStack {
                         Spacer()
                         ZStack {
-                            PaperView(theme: ReaderTheme.default)
+                            // PaperView 的 theme 本来就是可选参数，直接不传即可
+                            PaperView()
+
                             if rule.kind != .none {
                                 PageRuleLayer(style: rule, pageSize: previewSize)
                             }
