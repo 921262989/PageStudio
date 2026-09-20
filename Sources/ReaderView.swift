@@ -19,8 +19,8 @@ struct BookReaderView: View {
     // 绘制
     @State private var isPenActive = false
     @State private var activeTool: ActiveTool = .brush(.pen)
-    @State private var penColor: Color = Color(white: 0.05)
-    @State private var customColor: Color = Color(red: 0.1, green: 0.5, blue: 0.9)
+    @State private var penColor: Color = Color(white: 0.06)
+    @State private var draftColor: Color = Color(red: 0.1, green: 0.5, blue: 0.9)
     @State private var penWidth: PenWidth = .medium
     @State private var eraserKind: EraserKind = .precise
     @State private var eraserWidth: EraserWidth = .medium
@@ -30,13 +30,15 @@ struct BookReaderView: View {
     @State private var clearTrigger = 0
     @State private var zoomResetTrigger = 0
     @State private var showEraserPanel = false
+    @State private var brushBarCollapsed = false
+    @State private var saveColorPulse = false
 
     /// 每一页翻页动画时长
-    private let flipStepDuration: Double = 0.20
-    /// 每滑动这么多点，翻一页
-    private let swipeStepPoints: CGFloat = 90
+    private let flipStepDuration: Double = 0.24
+    /// 每滑动这么多点，才翻一页（数值越大，翻页越慢、越好控制）
+    private let swipeStepPoints: CGFloat = 150
     /// 一次滑动最多翻多少页
-    private let maxFlipPerSwipe = 25
+    private let maxFlipPerSwipe = 20
 
     // 翻页状态
     @State private var flipProgress: CGFloat = 0
@@ -124,6 +126,13 @@ struct BookReaderView: View {
         }
         .onChange(of: library.book(id: bookID)?.pages.count ?? 0) { _ in
             clampAfterEdit()
+        }
+        .onChange(of: isPenActive) { active in
+            if active {
+                withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+                    brushBarCollapsed = false
+                }
+            }
         }
         .alert("提示",
                isPresented: Binding(
@@ -238,7 +247,7 @@ struct BookReaderView: View {
         .clipShape(RoundedRectangle(cornerRadius: bookCornerRadius, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: bookCornerRadius, style: .continuous)
-                .stroke(theme.paperBorderColor, lineWidth: 0.5)
+                .stroke(PaperStyle.border, lineWidth: 0.5)
         )
         .overlay {
             if isPenActive && index == unitIndex {
@@ -301,9 +310,9 @@ struct BookReaderView: View {
                              angle: -Double(flipProgress) * 180,
                              anchor: .leading,
                              perspective: 0.32,
-                             dimming: theme.flipDimming,
-                             paperColor: theme.paperColor,
-                             borderColor: theme.paperBorderColor)
+                             dimming: PaperStyle.flipDimming,
+                             paperColor: PaperStyle.fill,
+                             borderColor: PaperStyle.border)
                         .frame(width: pw, height: ph)
                         .position(x: pw * 1.5, y: ph / 2)
                 } else {
@@ -314,9 +323,9 @@ struct BookReaderView: View {
                              angle: Double(flipProgress) * 180,
                              anchor: .trailing,
                              perspective: 0.32,
-                             dimming: theme.flipDimming,
-                             paperColor: theme.paperColor,
-                             borderColor: theme.paperBorderColor)
+                             dimming: PaperStyle.flipDimming,
+                             paperColor: PaperStyle.fill,
+                             borderColor: PaperStyle.border)
                         .frame(width: pw, height: ph)
                         .position(x: pw / 2, y: ph / 2)
                 }
@@ -350,9 +359,9 @@ struct BookReaderView: View {
                                         :  Double(flipProgress) * 180,
                          anchor: forward ? .leading : .trailing,
                          perspective: 0.32,
-                         dimming: theme.flipDimming,
-                         paperColor: theme.paperColor,
-                         borderColor: theme.paperBorderColor)
+                         dimming: PaperStyle.flipDimming,
+                         paperColor: PaperStyle.fill,
+                         borderColor: PaperStyle.border)
                     .frame(width: pw, height: ph)
             }
             .frame(width: pw, height: ph)
@@ -440,6 +449,9 @@ struct BookReaderView: View {
 
         let canvas = DrawingCanvas(
             canvasSize: logical,
+            displaySize: CGSize(width: displayWidth, height: size.pageHeight),
+            book: book,
+            spreadIndex: sIndex,
             initialDrawing: drawingStore.load(bookId: book.id, spreadIndex: sIndex),
             pencilOnly: settings.pencilOnlyDrawMode,
             tool: currentTool,
@@ -448,11 +460,25 @@ struct BookReaderView: View {
             redoTrigger: redoTrigger,
             clearTrigger: clearTrigger,
             zoomResetTrigger: zoomResetTrigger,
+            gesturesEnabled: settings.gesturesEnabled,
+            twoFingerUndo: settings.twoFingerUndo,
+            twoFingerLongPressUndo: settings.twoFingerLongPressUndo,
+            threeFingerRedo: settings.threeFingerRedo,
+            fourFingerClear: settings.fourFingerClear,
+            longPressEyedropper: settings.longPressEyedropper,
             onDrawingChanged: { newDrawing in
                 drawingStore.save(newDrawing, bookId: book.id, spreadIndex: sIndex)
                 handleAutoAppend(book: book, spreadIndex: sIndex, drawing: newDrawing)
             },
-            onDrawingStateChanged: { _ in }
+            onDrawingStateChanged: { _ in },
+            onPickColor: { picked in
+                penColor = picked
+                draftColor = picked
+                // 吸色时自动切回笔刷
+                if activeTool.isEraser {
+                    activeTool = .brush(.pen)
+                }
+            }
         )
         .frame(width: logical.width, height: logical.height)
         .scaleEffect(scale, anchor: .topLeading)
@@ -475,8 +501,7 @@ struct BookReaderView: View {
             return PKInkingTool(kind.inkType, color: ui, width: width)
 
         case .eraser:
-            // ⚠️ 带宽度的构造函数是 iOS 16.4 才有的。
-            //    低版本退回系统默认大小，不会崩。
+            // 带宽度的构造函数是 iOS 16.4 才有的
             if #available(iOS 16.4, *) {
                 return PKEraserTool(eraserKind.pkType, width: eraserWidth.value)
             } else {
@@ -521,7 +546,7 @@ struct BookReaderView: View {
         settings.edgeTapTurn && (!isPenActive || settings.pencilOnlyDrawMode)
     }
 
-    /// 滑动 = 连续翻多页
+    /// 滑动 = 连续翻多页。`swipeStepPoints` 控制灵敏度（数值越大越难翻）。
     private func turnGesture(available: CGSize) -> some Gesture {
         DragGesture(minimumDistance: 10)
             .onChanged { value in
@@ -567,6 +592,7 @@ struct BookReaderView: View {
                         stepFlip(book: book)
                     }
                 } else if dragStepsApplied == 0 && pendingFlips == 0 {
+                    // 极轻的一次滑动：至少翻一页
                     flipForward = shouldTurnForward(dx: value.translation.width)
                     pendingFlips = 1
                     stepFlip(book: book)
@@ -710,7 +736,7 @@ struct BookReaderView: View {
         }
     }
 
-    // MARK: - 底部栏
+    // MARK: - 底部栏（浏览模式）
 
     @ViewBuilder
     private func bottomBar(book: Book) -> some View {
@@ -757,11 +783,44 @@ struct BookReaderView: View {
         }
     }
 
-    // MARK: - 笔工具栏
+    // MARK: - 画笔工具栏（两行 / 可收起）
 
+    @ViewBuilder
     private var penToolbar: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 10) {
+        if brushBarCollapsed {
+            collapsedBar
+        } else {
+            expandedBar
+        }
+    }
+
+    private var collapsedBar: some View {
+        Button {
+            withAnimation(.spring(response: 0.30, dampingFraction: 0.82)) {
+                brushBarCollapsed = false
+            }
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "paintbrush.pointed.fill")
+                    .font(.system(size: 13))
+                Text("画笔")
+                    .font(.system(size: 12, weight: .medium))
+                Image(systemName: "chevron.up")
+                    .font(.system(size: 10, weight: .semibold))
+            }
+            .foregroundStyle(.white)
+            .padding(.vertical, 9)
+            .padding(.horizontal, 18)
+            .background(Color.black.opacity(0.72), in: Capsule())
+            .overlay(Capsule().stroke(Color.white.opacity(0.12), lineWidth: 0.5))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var expandedBar: some View {
+        VStack(spacing: 8) {
+            // 第一行：工具 + 操作
+            toolbarRow {
                 ForEach(PenKind.allCases) { kind in
                     toolButton(isActive: activeTool == .brush(kind),
                                systemImage: kind.systemImage) {
@@ -769,7 +828,7 @@ struct BookReaderView: View {
                     }
                 }
 
-                Divider().frame(height: 20)
+                rowDivider
 
                 toolButton(isActive: activeTool.isEraser,
                            systemImage: eraserKind.systemImage) {
@@ -777,30 +836,88 @@ struct BookReaderView: View {
                     showEraserPanel = true
                 }
 
-                Divider().frame(height: 20)
+                rowDivider
 
-                ForEach(PenColorPreset.allCases) { preset in
-                    Circle()
-                        .fill(preset.color)
-                        .frame(width: 19, height: 19)
-                        .overlay(
-                            Circle().stroke(
-                                Color.white.opacity(penColor == preset.color
-                                                    ? 0.95 : 0.16),
-                                lineWidth: penColor == preset.color ? 2.5 : 1
-                            )
-                        )
-                        .onTapGesture { penColor = preset.color }
+                toolButton(isActive: false,
+                           systemImage: "arrow.uturn.backward") { undoTrigger += 1 }
+                toolButton(isActive: false,
+                           systemImage: "arrow.uturn.forward") { redoTrigger += 1 }
+                toolButton(isActive: false,
+                           systemImage: "trash") { clearTrigger += 1 }
+
+                rowDivider
+
+                toolButton(isActive: false,
+                           systemImage: "arrow.up.left.and.arrow.down.right") {
+                    zoomResetTrigger += 1
                 }
 
-                ColorPicker("", selection: $customColor, supportsOpacity: false)
+                rowDivider
+
+                toolButton(isActive: false,
+                           systemImage: "chevron.down") {
+                    withAnimation(.spring(response: 0.30, dampingFraction: 0.82)) {
+                        brushBarCollapsed = true
+                    }
+                }
+            }
+
+            // 第二行：颜色 + 粗细
+            toolbarRow {
+                ForEach(PenColorPreset.allCases) { preset in
+                    colorDot(preset.color, isSelected: penColor == preset.color) {
+                        penColor = preset.color
+                        draftColor = preset.color
+                    }
+                }
+
+                rowDivider
+
+                // 用户固定进来的自定义颜色
+                ForEach(settingsStore.savedColors) { item in
+                    colorDot(item.color, isSelected: penColor == item.color) {
+                        penColor = item.color
+                        draftColor = item.color
+                    }
+                    .onLongPressGesture {
+                        settingsStore.removeColor(item)
+                    }
+                }
+
+                // 取色器
+                ColorPicker("", selection: $draftColor, supportsOpacity: false)
                     .labelsHidden()
                     .frame(width: 26, height: 26)
-                    .onChange(of: customColor) { newValue in
+                    .onChange(of: draftColor) { newValue in
                         penColor = newValue
                     }
 
-                Divider().frame(height: 20)
+                // 把当前颜色固定到笔刷栏
+                Button {
+                    settingsStore.addColor(penColor)
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.6)) {
+                        saveColorPulse = true
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                        withAnimation { saveColorPulse = false }
+                    }
+                } label: {
+                    ZStack {
+                        Circle()
+                            .fill(penColor)
+                            .frame(width: 24, height: 24)
+                        Circle()
+                            .stroke(Color.white.opacity(0.9), lineWidth: 1.5)
+                            .frame(width: 24, height: 24)
+                        Image(systemName: "plus")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(contrastingTextColor(for: penColor))
+                    }
+                    .scaleEffect(saveColorPulse ? 1.25 : 1.0)
+                }
+                .buttonStyle(.plain)
+
+                rowDivider
 
                 ForEach(PenWidth.allCases) { w in
                     Button {
@@ -817,25 +934,29 @@ struct BookReaderView: View {
                     }
                     .buttonStyle(.plain)
                 }
+            }
+        }
+    }
 
-                Divider().frame(height: 20)
+    private var rowDivider: some View {
+        Divider()
+            .frame(height: 20)
+            .overlay(Color.white.opacity(0.25))
+    }
 
-                toolButton(isActive: false,
-                           systemImage: "arrow.uturn.backward") { undoTrigger += 1 }
-                toolButton(isActive: false,
-                           systemImage: "arrow.uturn.forward") { redoTrigger += 1 }
-                toolButton(isActive: false,
-                           systemImage: "trash") { clearTrigger += 1 }
-                toolButton(isActive: false,
-                           systemImage: "arrow.up.left.and.arrow.down.right") {
-                    zoomResetTrigger += 1
-                }
+    @ViewBuilder
+    private func toolbarRow<Content: View>(
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 9) {
+                content()
             }
             .padding(.vertical, 8)
             .padding(.horizontal, 14)
         }
-        .frame(maxWidth: 760)
-        .background(Color.black.opacity(0.70), in: Capsule())
+        .frame(maxWidth: 780)
+        .background(Color.black.opacity(0.72), in: Capsule())
         .overlay(Capsule().stroke(Color.white.opacity(0.10), lineWidth: 0.5))
     }
 
@@ -854,6 +975,33 @@ struct BookReaderView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 8))
         }
         .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private func colorDot(_ color: Color,
+                          isSelected: Bool,
+                          action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Circle()
+                .fill(color)
+                .frame(width: 24, height: 24)
+                .overlay(
+                    Circle().stroke(
+                        Color.white.opacity(isSelected ? 0.95 : 0.16),
+                        lineWidth: isSelected ? 2.5 : 1
+                    )
+                )
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// 在浅色/深色底上选不同的加号颜色，保证看得见
+    private func contrastingTextColor(for color: Color) -> Color {
+        let ui = UIColor(color)
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        guard ui.getRed(&r, green: &g, blue: &b, alpha: &a) else { return .black }
+        let luminance = 0.299 * r + 0.587 * g + 0.114 * b
+        return luminance > 0.6 ? .black : .white
     }
 
     // MARK: - 导航栏工具栏
