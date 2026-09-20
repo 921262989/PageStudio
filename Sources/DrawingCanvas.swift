@@ -45,13 +45,13 @@ struct DrawingCanvas: UIViewRepresentable {
     let onPickColor: (Color) -> Void
     var onZoomChanged: (CGFloat) -> Void = { _ in }
 
-    /// ⚠️ 所有自定义手势只接受「手指」触摸，刻意排除 Apple Pencil。
+    /// ⚠️ 画布里的所有自定义手势只接受「手指」触摸，刻意排除 Apple Pencil。
     ///
-    /// UIGestureRecognizer 默认也会接收 Pencil 的触摸。写字时
+    /// UIGestureRecognizer 默认连 Pencil 的触摸一起收。写字时
     /// 「笔尖 + 搭在屏上的小拇指」就是两个触摸点，会被当成双指手势，
     /// 画布于是开始平移 / 缩放 —— 写字时画布乱飘就是这么来的。
-    /// 这里把 Pencil 从手势里彻底剔除：笔只负责画画，手势只认手指。
-    private static let fingerOnly: [NSNumber] = [
+    /// 钉死为 finger 之后：笔只画画，手势只认手指。
+    static let fingerOnly: [NSNumber] = [
         NSNumber(value: UITouch.TouchType.direct.rawValue)
     ]
 
@@ -87,7 +87,7 @@ struct DrawingCanvas: UIViewRepresentable {
         scroll.setZoomScale(fit, animated: false)
 
         // 系统自带的 pinch / pan 全部关掉
-        // （给它们设 delegate 会崩，不设又抢不过画布，所以自己造）
+        // （给它们设 delegate 会崩，不设又抢不过画布，所以下面自己造）
         scroll.pinchGestureRecognizer?.isEnabled = false
         scroll.panGestureRecognizer.isEnabled = false
 
@@ -144,7 +144,7 @@ struct DrawingCanvas: UIViewRepresentable {
 
         applyInitialOffset(scroll, fit: fit, animated: false, in: context.coordinator)
 
-        // MARK: 双指捏合 → 缩放
+        // MARK: 双指捏合 → 缩放（只认手指）
         let pinch = UIPinchGestureRecognizer(
             target: context.coordinator,
             action: #selector(Coordinator.handlePinch(_:))
@@ -156,7 +156,7 @@ struct DrawingCanvas: UIViewRepresentable {
         scroll.addGestureRecognizer(pinch)
         context.coordinator.customPinch = pinch
 
-        // MARK: 双指拖动 → 平移
+        // MARK: 双指拖动 → 平移（只认手指）
         let twoPan = UIPanGestureRecognizer(
             target: context.coordinator,
             action: #selector(Coordinator.handleTwoFingerPan(_:))
@@ -224,7 +224,7 @@ struct DrawingCanvas: UIViewRepresentable {
         scroll.addGestureRecognizer(fourTap)
         context.coordinator.fourFingerTap = fourTap
 
-        // MARK: 单指长按 → 吸色
+        // MARK: 单指长按 → 吸色（只认手指）
         let eyedropper = UILongPressGestureRecognizer(
             target: context.coordinator,
             action: #selector(Coordinator.handleEyedropper(_:))
@@ -355,12 +355,10 @@ struct DrawingCanvas: UIViewRepresentable {
         context.coordinator.eyedropperGesture?.isEnabled =
             on && longPressEyedropper && pencilOnly
 
-        // ✅ 双指缩放 / 平移始终开启。
-        //    只有「仅 Pencil」模式下、笔尖正落在纸上作画的那一刻才临时停用，
-        //    笔一抬起来立刻恢复。
-        let pencilDrawingNow = pencilOnly && context.coordinator.isPencilDrawing
-        context.coordinator.customPinch?.isEnabled = !pencilDrawingNow
-        context.coordinator.twoFingerPan?.isEnabled = !pencilDrawingNow
+        // 双指缩放 / 平移：始终开启，任何模式下都不关。
+        // Apple Pencil 已经被 allowedTouchTypes 排除在外，笔不会误触发它们。
+        context.coordinator.customPinch?.isEnabled = true
+        context.coordinator.twoFingerPan?.isEnabled = true
     }
 
     // MARK: - 偏移换算
@@ -408,10 +406,6 @@ struct DrawingCanvas: UIViewRepresentable {
         var displaySize: CGSize = .zero
         var initialOffsetX: CGFloat = 0
         var pencilOnly: Bool = false
-
-        /// 笔尖是否正落在纸上作画。
-        /// 「仅 Pencil」模式下它用来临时停用双指手势，避免写字时画布被拖走。
-        var isPencilDrawing: Bool = false
 
         var lastToolSignature: String = ""
         var lastUndoTrigger: Int = 0
@@ -601,23 +595,10 @@ struct DrawingCanvas: UIViewRepresentable {
 
         func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
             onDrawingStateChanged(true)
-
-            // 「仅 Pencil」模式：笔尖一落纸，立刻停用双指手势。
-            // 这样写字时手掌、小拇指怎么蹭都不会把画布拖走。
-            // 笔一抬（下面的 didEnd）马上恢复。
-            guard pencilOnly else { return }
-            isPencilDrawing = true
-            customPinch?.isEnabled = false
-            twoFingerPan?.isEnabled = false
         }
 
         func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
             onDrawingStateChanged(false)
-
-            guard pencilOnly else { return }
-            isPencilDrawing = false
-            customPinch?.isEnabled = true
-            twoFingerPan?.isEnabled = true
         }
 
         // MARK: 手势动作
@@ -704,5 +685,109 @@ struct DrawingCanvas: UIViewRepresentable {
                 UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
             }
         }
+    }
+}
+
+// MARK: - 只认手指的手势层（书页上的翻页 / 边缘点击）
+
+/// 铺在书页上面的一层透明视图，专门接管「手指」的拖动和点击。
+///
+/// 为什么需要它：
+/// SwiftUI 的 DragGesture / SpatialTapGesture 分不清手指和 Apple Pencil，
+/// Pencil 划过纸边也会被算成翻页拖动。UIKit 的手势可以限制触摸类型，
+/// 所以这里换成 UIKit 手势，并把触摸类型钉死为「手指」。
+///
+/// Apple Pencil 的触摸会从这一层「穿透」下去，落到下面的画布上照常画画。
+struct FingerGestureLayer: UIViewRepresentable {
+    /// 是否接管手指拖动（翻页）
+    var panEnabled: Bool
+    /// 是否接管手指点击（边缘翻页）
+    var tapEnabled: Bool
+
+    /// 拖动中：相对起点的横向位移
+    var onPanChanged: (CGFloat) -> Void
+    /// 松手：实际位移 + 预测位移
+    var onPanEnded: (CGFloat, CGFloat) -> Void
+    /// 点击：位置（相对本层）
+    var onTap: (CGPoint) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = PencilPassthroughView()
+        view.backgroundColor = .clear
+
+        let pan = UIPanGestureRecognizer(target: context.coordinator,
+                                         action: #selector(Coordinator.handlePan(_:)))
+        pan.allowedTouchTypes = DrawingCanvas.fingerOnly
+        pan.maximumNumberOfTouches = 1
+        pan.cancelsTouchesInView = false
+        pan.delaysTouchesBegan = false
+        pan.delegate = context.coordinator
+        view.addGestureRecognizer(pan)
+
+        let tap = UITapGestureRecognizer(target: context.coordinator,
+                                         action: #selector(Coordinator.handleTap(_:)))
+        tap.allowedTouchTypes = DrawingCanvas.fingerOnly
+        tap.numberOfTapsRequired = 1
+        tap.cancelsTouchesInView = false
+        tap.delegate = context.coordinator
+        view.addGestureRecognizer(tap)
+
+        context.coordinator.pan = pan
+        context.coordinator.tap = tap
+        context.coordinator.host = view
+        return view
+    }
+
+    func updateUIView(_ view: UIView, context: Context) {
+        context.coordinator.parent = self
+        view.isUserInteractionEnabled = (panEnabled || tapEnabled)
+        context.coordinator.pan?.isEnabled = panEnabled
+        context.coordinator.tap?.isEnabled = tapEnabled
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var parent: FingerGestureLayer
+        weak var pan: UIPanGestureRecognizer?
+        weak var tap: UITapGestureRecognizer?
+        weak var host: UIView?
+
+        init(_ parent: FingerGestureLayer) { self.parent = parent }
+
+        @objc func handlePan(_ g: UIPanGestureRecognizer) {
+            guard let host else { return }
+            switch g.state {
+            case .changed:
+                parent.onPanChanged(g.translation(in: host).x)
+            case .ended, .cancelled:
+                parent.onPanEnded(g.translation(in: host).x,
+                                  g.predictedEndTranslation(in: host).x)
+            default:
+                break
+            }
+        }
+
+        @objc func handleTap(_ g: UITapGestureRecognizer) {
+            guard let host else { return }
+            parent.onTap(g.location(in: host))
+        }
+
+        func gestureRecognizer(_ g: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            true
+        }
+    }
+}
+
+/// Apple Pencil 的触摸直接放行（返回 nil → 穿透到下面的画布），
+/// 手指则被这一层接住。这样「笔只画画、手指只做手势」互不干扰。
+final class PencilPassthroughView: UIView {
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        if let touches = event?.allTouches,
+           touches.contains(where: { $0.type == .pencil }) {
+            return nil
+        }
+        return super.hitTest(point, with: event)
     }
 }
