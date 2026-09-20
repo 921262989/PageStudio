@@ -63,14 +63,11 @@ struct BookReaderView: View {
     @State private var showOutline = false
     @State private var showLayers = false
 
-    /// 调整范围的目标页
     @State private var adjustPageIndex: Int? = nil
     @State private var showImageAdjust = false
 
-    /// 替换图片的目标页（导入照片到当前页）
     @State private var replacePageIndex: Int? = nil
 
-    /// 浮出的「左页 / 右页」选择
     @State private var choiceIndices: [Int] = []
     @State private var choiceTitle = ""
     @State private var choiceIsReplace = false
@@ -79,7 +76,6 @@ struct BookReaderView: View {
     @State private var didAutoAppend = false
 
     @State private var showPhotoPicker = false
-    @State private var showFileImporter = false
     @State private var photoItems: [PhotosPickerItem] = []
     @State private var importOccupiesSpread = false
     @State private var importMessage: String? = nil
@@ -133,11 +129,6 @@ struct BookReaderView: View {
                 Task { await importFromPhotos(items) }
             }
         }
-        .fileImporter(isPresented: $showFileImporter,
-                      allowedContentTypes: [.pdf, .image],
-                      allowsMultipleSelection: false) { result in
-            importFromFiles(result)
-        }
         .sheet(isPresented: $showThumbnails) {
             if let book {
                 ThumbnailPanelView(book: book,
@@ -188,9 +179,8 @@ struct BookReaderView: View {
                 }
             }
         }
-        .confirmationDialog(choiceTitle,
-                            isPresented: $showChoice,
-                            titleVisibility: .visible) {
+        // 左页 / 右页选择：用 alert（iPad 上一定居中显示）
+        .alert(choiceTitle, isPresented: $showChoice) {
             ForEach(choiceIndices, id: \.self) { idx in
                 Button("第 \(idx + 1) 页") {
                     if choiceIsReplace {
@@ -454,7 +444,7 @@ struct BookReaderView: View {
         }
     }
 
-    // MARK: - 翻页场景（翻动的那张纸放在裁剪层之外，可以探出书框）
+    // MARK: - 翻页场景（翻动的那张纸放在裁剪层之外，可探出书框）
 
     @ViewBuilder
     private func spreadOrSingleFlipping(book: Book, size: ReaderSize,
@@ -485,7 +475,6 @@ struct BookReaderView: View {
                                                    binding: book.bindingDirection)
 
             ZStack {
-                // ① 静止层：目标跨页，裁在书框里
                 ZStack {
                     SpreadCanvasView(book: book,
                                      spread: toSpread,
@@ -514,7 +503,6 @@ struct BookReaderView: View {
                         .stroke(PaperStyle.border, lineWidth: 0.5)
                 )
 
-                // ② 翻动的那张纸：不在裁剪层里，转动时能探出书框
                 FlipCard(front: pageOrPaper(book: book, index: fromSides.right,
                                             size: size),
                          back: pageOrPaper(book: book, index: toSides.left,
@@ -541,7 +529,6 @@ struct BookReaderView: View {
 
         if book.pages.indices.contains(from), book.pages.indices.contains(to) {
             ZStack {
-                // ① 静止层
                 ZStack {
                     SinglePageView(book: book,
                                    pageIndex: to,
@@ -566,7 +553,6 @@ struct BookReaderView: View {
                         .stroke(PaperStyle.border, lineWidth: 0.5)
                 )
 
-                // ② 翻动的纸
                 FlipCard(front: pageOrPaper(book: book, index: from, size: size),
                          back: pageOrPaper(book: book, index: to, size: size),
                          angle: -Double(progress) * 180,
@@ -735,8 +721,6 @@ struct BookReaderView: View {
         }
     }
 
-    /// 当前「看得见的这一页」有哪些页。
-    /// 双页模式下是左页 + 右页两页。
     private func visiblePageIndices(book: Book) -> [Int] {
         let total = book.pages.count
         guard total > 0 else { return [] }
@@ -756,12 +740,9 @@ struct BookReaderView: View {
         }
     }
 
-    /// 「把照片导入到当前页」和「调整本页范围」都先走这里：
-    /// 只有一页就直接做，两页就先问用户选哪一页。
     private func chooseVisiblePage(book: Book,
                                    title: String,
                                    isReplace: Bool) {
-        // ⚠️ 这里必须带参数标签 book:
         let indices = visiblePageIndices(book: book)
         guard !indices.isEmpty else { return }
 
@@ -1343,7 +1324,6 @@ struct BookReaderView: View {
 
                 rowDivider
 
-                // 把照片导入到当前这一页（不新建）
                 toolButton(isActive: false, systemImage: "photo.badge.plus") {
                     if let book {
                         chooseVisiblePage(book: book,
@@ -1578,9 +1558,11 @@ struct BookReaderView: View {
                 } label: {
                     Label("从照片导入（每张占一页）", systemImage: "photo")
                 }
+
+                // 走原生文件选择器（不再用 SwiftUI 的 fileImporter）
                 Button {
                     importOccupiesSpread = false
-                    showFileImporter = true
+                    presentDocumentPicker()
                 } label: {
                     Label("从文件导入图片 / PDF", systemImage: "folder")
                 }
@@ -1597,7 +1579,7 @@ struct BookReaderView: View {
                 }
                 Button {
                     importOccupiesSpread = true
-                    showFileImporter = true
+                    presentDocumentPicker()
                 } label: {
                     Label("从文件导入（占整个跨页）",
                           systemImage: "folder.badge.plus")
@@ -1622,6 +1604,54 @@ struct BookReaderView: View {
         updated.pages.append(.blank())
         library.update(updated)
         didAutoAppend = true
+    }
+
+    // MARK: - 文件选择（原生 UIDocumentPicker）
+
+    private func presentDocumentPicker() {
+        DocumentPickerService.present(types: [.pdf, .image],
+                                      allowsMultiple: false) { urls in
+            guard let url = urls.first else { return }
+            handlePickedFile(url)
+        }
+    }
+
+    private func handlePickedFile(_ url: URL) {
+        let occupies = importOccupiesSpread
+        let ext = url.pathExtension.lowercased()
+
+        if ext == "pdf" {
+            let dest = FileStorage.temporaryPDFURL()
+            do {
+                try FileManager.default.copyItem(at: url, to: dest)
+            } catch {
+                importMessage = "读取 PDF 失败：\(error.localizedDescription)"
+                return
+            }
+
+            Task { @MainActor in
+                await importPDFPages(url: dest, occupies: occupies)
+                FileStorage.deleteTemporaryPDF(url: dest)
+            }
+            return
+        }
+
+        guard let data = try? Data(contentsOf: url) else {
+            importMessage = "读取文件失败"
+            return
+        }
+
+        let fileExt = ext.isEmpty
+            ? ImageFileType.fileExtension(for: data)
+            : ext
+
+        guard let name = try? FileStorage.saveImageData(data,
+                                                        preferredExtension: fileExt) else {
+            importMessage = "保存图片失败"
+            return
+        }
+
+        appendPages([Page.image(fileName: name, occupiesSpread: occupies)])
     }
 
     // MARK: - 导入
@@ -1683,54 +1713,6 @@ struct BookReaderView: View {
             return
         }
         appendPages(newPages)
-    }
-
-    private func importFromFiles(_ result: Result<[URL], Error>) {
-        switch result {
-        case .failure(let error):
-            importMessage = "导入失败：\(error.localizedDescription)"
-
-        case .success(let urls):
-            guard let url = urls.first else { return }
-
-            let accessing = url.startAccessingSecurityScopedResource()
-            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
-
-            let ext = url.pathExtension.lowercased()
-            let occupies = importOccupiesSpread
-
-            if ext == "pdf" {
-                let dest = FileStorage.temporaryPDFURL()
-                do {
-                    try FileManager.default.copyItem(at: url, to: dest)
-                } catch {
-                    importMessage = "读取 PDF 失败：\(error.localizedDescription)"
-                    return
-                }
-                Task { @MainActor in
-                    await importPDFPages(url: dest, occupies: occupies)
-                    FileStorage.deleteTemporaryPDF(url: dest)
-                }
-                return
-            }
-
-            guard let data = try? Data(contentsOf: url) else {
-                importMessage = "读取文件失败"
-                return
-            }
-
-            let fileExt = ext.isEmpty
-                ? ImageFileType.fileExtension(for: data)
-                : ext
-
-            guard let name = try? FileStorage.saveImageData(data,
-                                                            preferredExtension: fileExt) else {
-                importMessage = "保存图片失败"
-                return
-            }
-
-            appendPages([Page.image(fileName: name, occupiesSpread: occupies)])
-        }
     }
 
     private func importPDFPages(url: URL, occupies: Bool) async {
@@ -1798,6 +1780,64 @@ struct BookReaderView: View {
                                                        in: currentBook))
         } else {
             position = Double(startIndex)
+        }
+    }
+}
+
+// MARK: - 原生文件选择器
+//
+// SwiftUI 的 .fileImporter 在 iPad 上时不时不回调（点了文件没反应）。
+// 这里直接用 UIDocumentPickerViewController，并用 asCopy: true，
+// 拿到的就是本地副本，不需要安全作用域那套，稳定得多。
+
+enum DocumentPickerService {
+    static func present(types: [UTType],
+                        allowsMultiple: Bool,
+                        completion: @escaping ([URL]) -> Void) {
+        guard let scene = UIApplication.shared.connectedScenes
+                .compactMap({ $0 as? UIWindowScene })
+                .first(where: { $0.activationState == .foregroundActive })
+                ?? UIApplication.shared.connectedScenes
+                    .compactMap({ $0 as? UIWindowScene })
+                    .first,
+              let window = scene.windows.first(where: { $0.isKeyWindow })
+                ?? scene.windows.first,
+              let root = window.rootViewController else {
+            completion([])
+            return
+        }
+
+        var top = root
+        while let presented = top.presentedViewController {
+            top = presented
+        }
+
+        Delegate.shared.completion = completion
+
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: types,
+                                                    asCopy: true)
+        picker.allowsMultipleSelection = allowsMultiple
+        picker.shouldShowFileExtensions = true
+        picker.delegate = Delegate.shared
+
+        top.present(picker, animated: true)
+    }
+
+    final class Delegate: NSObject, UIDocumentPickerDelegate {
+        static let shared = Delegate()
+        var completion: (([URL]) -> Void)?
+
+        func documentPicker(_ controller: UIDocumentPickerViewController,
+                            didPickDocumentsAt urls: [URL]) {
+            let block = completion
+            completion = nil
+            block?(urls)
+        }
+
+        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+            let block = completion
+            completion = nil
+            block?([])
         }
     }
 }
