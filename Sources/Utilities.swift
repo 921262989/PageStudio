@@ -11,7 +11,6 @@ enum FileStorage {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
     }
 
-    /// 画册索引
     static var libraryFile: URL {
         documents.appendingPathComponent("library.json")
     }
@@ -24,6 +23,16 @@ enum FileStorage {
         ensure(documents.appendingPathComponent("Thumbnails", isDirectory: true))
     }
 
+    /// 笔迹目录：Drawings/<bookId>/<spreadIndex>.drawing
+    static var drawingsDirectory: URL {
+        ensure(documents.appendingPathComponent("Drawings", isDirectory: true))
+    }
+
+    /// 导出临时目录
+    static var exportDirectory: URL {
+        ensure(documents.appendingPathComponent("Exports", isDirectory: true))
+    }
+
     @discardableResult
     static func ensure(_ url: URL) -> URL {
         if !FileManager.default.fileExists(atPath: url.path) {
@@ -32,6 +41,8 @@ enum FileStorage {
         }
         return url
     }
+
+    // MARK: 图片
 
     static func imageURL(named name: String) -> URL {
         imagesDirectory.appendingPathComponent(name)
@@ -45,6 +56,24 @@ enum FileStorage {
 
     static func deleteImage(named name: String) {
         try? FileManager.default.removeItem(at: imageURL(named: name))
+    }
+
+    // MARK: 笔迹
+
+    static func bookDrawingsDirectory(bookId: UUID) -> URL {
+        ensure(drawingsDirectory.appendingPathComponent(bookId.uuidString,
+                                                        isDirectory: true))
+    }
+
+    static func drawingURL(bookId: UUID, spreadIndex: Int) -> URL {
+        bookDrawingsDirectory(bookId: bookId)
+            .appendingPathComponent("\(spreadIndex).drawing")
+    }
+
+    static func deleteDrawings(bookId: UUID) {
+        let dir = drawingsDirectory.appendingPathComponent(bookId.uuidString,
+                                                           isDirectory: true)
+        try? FileManager.default.removeItem(at: dir)
     }
 }
 
@@ -90,7 +119,6 @@ enum ImageLoader {
 
 // MARK: - 图片格式识别
 
-/// 通过文件头判断图片真实格式
 enum ImageFileType {
 
     static func fileExtension(for data: Data) -> String {
