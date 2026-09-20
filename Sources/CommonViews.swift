@@ -3,8 +3,6 @@ import PencilKit
 
 // MARK: - 纸张
 
-/// 纸张永远是米白色，不随主题变化。
-/// 保留 `theme` 参数只是为了兼容已有调用点，内部不使用。
 struct PaperView: View {
     var theme: ReaderTheme? = nil
 
@@ -39,7 +37,7 @@ struct SpineLineView: View {
     }
 }
 
-// MARK: - 阅读区背景（这个才随主题变）
+// MARK: - 阅读区背景
 
 struct ReaderBackground: View {
     let theme: ReaderTheme
@@ -98,7 +96,57 @@ struct StoredImage<Content: View>: View {
     }
 }
 
-// MARK: - 跨页笔迹的烘焙图
+// MARK: - 把 PKDrawing 渲染成叠图
+
+/// 通用版：直接给一个 `PKDrawing`，渲染成与 size 等大的透明叠图。
+/// 图层渲染用它；单层笔迹也用得上。
+struct InkImageView: View {
+    let drawing: PKDrawing
+    let size: CGSize
+    /// 外部版本号。变了就重新渲染。
+    let revision: Int
+    var renderScale: CGFloat = 2
+    var opacity: Double = 1.0
+
+    @State private var image: UIImage?
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: size.width, height: size.height)
+                    .opacity(opacity)
+            } else {
+                Color.clear
+            }
+        }
+        .allowsHitTesting(false)
+        .task(id: "\(revision)-\(drawing.strokes.count)") {
+            await render()
+        }
+    }
+
+    private func render() async {
+        guard !drawing.strokes.isEmpty else {
+            image = nil
+            return
+        }
+        let logical = DrawingGeometry.spreadSize(ratio: 1.414) // 会被外层拉伸
+        let target = CGRect(origin: .zero, size: logical)
+        let scale = renderScale
+        let d = drawing
+
+        let rendered = await Task.detached(priority: .userInitiated) { () -> UIImage? in
+            d.image(from: target, scale: scale)
+        }.value
+
+        image = rendered
+    }
+}
+
+// MARK: - 跨页笔迹的烘焙图（单层 · 旧用法）
 
 /// ⚠️ 只在「这一页不处于编辑状态」时使用。
 /// 编辑中的页如果同时显示烘焙图，会和画布上的实时笔迹重叠，
