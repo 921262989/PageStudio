@@ -11,43 +11,53 @@ struct BookReaderView: View {
 
     let bookID: UUID
 
-    // MARK: 阅读位置
+    // 阅读位置
     @State private var viewMode: ViewMode = .spread
     @State private var unitIndex = 0
     @State private var didInitialize = false
 
-    // MARK: 绘制
+    // 绘制
     @State private var isPenActive = false
-    @State private var penKind: PenKind = .pen
-    @State private var penColorEnum: PenColor = .black
+    @State private var activeTool: ActiveTool = .brush(.pen)
+    @State private var penColor: Color = Color(white: 0.05)
+    @State private var customColor: Color = Color(red: 0.1, green: 0.5, blue: 0.9)
     @State private var penWidth: PenWidth = .medium
-    @State private var isDrawingNow = false
+    @State private var eraserKind: EraserKind = .precise
+    @State private var eraserWidth: EraserWidth = .medium
+
     @State private var undoTrigger = 0
     @State private var redoTrigger = 0
     @State private var clearTrigger = 0
-    @State private var didAutoAppend = false
+    @State private var zoomResetTrigger = 0
+    @State private var showEraserPanel = false
 
-    // MARK: 硬纸板翻页
+    private let flipStepDuration: Double = 0.20
+    /// 每滑动这么多点，就翻一页
+    private let swipeStepPoints: CGFloat = 90
+    /// 一次滑动最多翻多少页
+    private let maxFlipPerSwipe = 25
+
+    // 翻页动画
     @State private var flipProgress: CGFloat = 0
     @State private var isFlipping = false
     @State private var flipForward = true
     @State private var flipFromIndex = 0
+    @State private var pendingFlips = 0
+    @State private var flipLoopRunning = false
+    @State private var dragStepsApplied = 0
 
-    // MARK: 面板
-    @State private var scrubbing: Int? = nil
+    @State private var didAutoAppend = false
+
+    // 面板
     @State private var showThumbnails = false
     @State private var showOutline = false
 
-    // MARK: 导入
+    // 导入
     @State private var showPhotoPicker = false
     @State private var showFileImporter = false
     @State private var photoItems: [PhotosPickerItem] = []
     @State private var importOccupiesSpread = false
     @State private var importMessage: String? = nil
-
-    private let flipDuration: Double = 0.50
-    /// 拖拽超过这个比例就判定为"翻过去"
-    private let commitThreshold: CGFloat = 0.36
 
     private var book: Book? { library.book(id: bookID) }
     private var settings: AppSettings { settingsStore.settings }
@@ -68,9 +78,6 @@ struct BookReaderView: View {
                 }
             }
             .onAppear { initialize(container: geo.size) }
-            .onChange(of: settingsStore.settings.readerTheme) { _ in
-                // 主题切换：不重置阅读位置，只重绘
-            }
         }
         .navigationTitle(book?.title ?? "画册")
         .navigationBarTitleDisplayMode(.inline)
@@ -92,9 +99,14 @@ struct BookReaderView: View {
             if let book {
                 ThumbnailPanelView(book: book,
                                    currentPageIndex: currentPageIndex(book: book),
-                                   theme: theme) { pageIdx in
-                    jump(toPage: pageIdx, book: book)
-                }
+                                   theme: theme,
+                                   onSelect: { pageIdx in
+                                       jump(toPage: pageIdx, book: book)
+                                   },
+                                   onChange: { updated in
+                                       library.update(updated)
+                                       clampAfterEdit()
+                                   })
             }
         }
         .sheet(isPresented: $showOutline) {
@@ -110,7 +122,7 @@ struct BookReaderView: View {
             }
         }
         .onChange(of: library.book(id: bookID)?.pages.count ?? 0) { _ in
-            clampPosition()
+            clampAfterEdit()
         }
         .alert("提示",
                isPresented: Binding(
@@ -140,9 +152,14 @@ struct BookReaderView: View {
         .overlay(alignment: .bottom) {
             if isPenActive {
                 penToolbar
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 14)
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 12)
             }
+        }
+        .popover(isPresented: $showEraserPanel, arrowEdge: .bottom) {
+            EraserPanel(kind: $eraserKind,
+                        width: $eraserWidth,
+                        onClose: { showEraserPanel = false })
         }
     }
 
@@ -166,11 +183,9 @@ struct BookReaderView: View {
             }
         }
         .frame(width: available.width, height: available.height)
-        .overlay { scrubPreview(book: book, size: size) }
-        .overlay(alignment: .topLeading) { edgeTapZone(alignment: .leading, book: book) }
-        .overlay(alignment: .topTrailing) { edgeTapZone(alignment: .trailing, book: book) }
         .contentShape(Rectangle())
-        .gesture(turnGesture)
+        .gesture(turnGesture(available: available))
+        .simultaneousGesture(edgeTapGesture(available: available))
     }
 
     private var emptyHint: some View {
@@ -190,6 +205,10 @@ struct BookReaderView: View {
 
     @ViewBuilder
     private func stableScene(book: Book, size: ReaderSize, index: Int) -> some View {
+        // ⚠️ 编辑中的那一页，不显示烘焙笔迹 —— 否则会和画布上的实时笔迹重叠，
+        //    表现为「颜色变深、笔画变粗、几秒后变样」
+        let showBakedInk = !(isPenActive && index == unitIndex)
+
         Group {
             if viewMode == .spread {
                 let spreads = SpreadLayout.spreads(for: book)
@@ -199,7 +218,7 @@ struct BookReaderView: View {
                                      pageWidth: size.pageWidth,
                                      pageHeight: size.pageHeight,
                                      drawingRevision: drawingStore.revision,
-                                     showDrawing: true,
+                                     showDrawing: showBakedInk,
                                      theme: theme)
                 } else {
                     PaperView(theme: theme)
@@ -210,7 +229,7 @@ struct BookReaderView: View {
                                pageWidth: size.pageWidth,
                                pageHeight: size.pageHeight,
                                drawingRevision: drawingStore.revision,
-                               showDrawing: true,
+                               showDrawing: showBakedInk,
                                theme: theme)
             }
         }
@@ -220,7 +239,6 @@ struct BookReaderView: View {
             RoundedRectangle(cornerRadius: bookCornerRadius, style: .continuous)
                 .stroke(theme.paperBorderColor, lineWidth: 0.5)
         )
-        .shadow(color: .black.opacity(0.50), radius: 16, y: 8)
         .overlay {
             if isPenActive && index == unitIndex {
                 drawingLayer(book: book, unitIndex: index, size: size)
@@ -231,7 +249,8 @@ struct BookReaderView: View {
     // MARK: - 翻页场景
 
     @ViewBuilder
-    private func flippingScene(book: Book, size: ReaderSize, from: Int, forward: Bool) -> some View {
+    private func flippingScene(book: Book, size: ReaderSize,
+                               from: Int, forward: Bool) -> some View {
         if viewMode == .spread {
             spreadFlippingScene(book: book, size: size, from: from, forward: forward)
         } else {
@@ -239,7 +258,6 @@ struct BookReaderView: View {
         }
     }
 
-    /// 双页模式：翻动纸 = 当前跨页的一半，绕书脊转到另一侧
     @ViewBuilder
     private func spreadFlippingScene(book: Book, size: ReaderSize,
                                      from: Int, forward: Bool) -> some View {
@@ -257,7 +275,6 @@ struct BookReaderView: View {
                                                    binding: book.bindingDirection)
 
             ZStack {
-                // 底层：目标跨页
                 SpreadCanvasView(book: book,
                                  spread: toSpread,
                                  pageWidth: pw,
@@ -267,7 +284,6 @@ struct BookReaderView: View {
                                  theme: theme)
                     .frame(width: pw * 2, height: ph)
 
-                // 当前跨页不参与翻转的那一半（保持不动）
                 if forward {
                     pageOrPaper(book: book, index: fromSides.left, size: size)
                         .position(x: pw / 2, y: ph / 2)
@@ -276,7 +292,6 @@ struct BookReaderView: View {
                         .position(x: pw * 1.5, y: ph / 2)
                 }
 
-                // 翻动纸
                 if forward {
                     FlipCard(front: pageOrPaper(book: book, index: fromSides.right, size: size),
                              back: pageOrPaper(book: book, index: toSides.left, size: size),
@@ -302,12 +317,11 @@ struct BookReaderView: View {
                 }
             }
             .frame(width: pw * 2, height: ph)
-            .clipShape(RoundedRectangle(cornerRadius: bookCornerRadius, style: .continuous))
-            .shadow(color: .black.opacity(0.50), radius: 16, y: 8)
+            .clipShape(RoundedRectangle(cornerRadius: bookCornerRadius,
+                                        style: .continuous))
         }
     }
 
-    /// 单页模式：翻动纸绕外侧装订边翻出去，露出新页
     @ViewBuilder
     private func singleFlippingScene(book: Book, size: ReaderSize,
                                      from: Int, forward: Bool) -> some View {
@@ -337,16 +351,11 @@ struct BookReaderView: View {
                     .frame(width: pw, height: ph)
             }
             .frame(width: pw, height: ph)
-            .clipShape(RoundedRectangle(cornerRadius: bookCornerRadius, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: bookCornerRadius, style: .continuous)
-                    .stroke(theme.paperBorderColor, lineWidth: 0.5)
-            )
-            .shadow(color: .black.opacity(0.50), radius: 16, y: 8)
+            .clipShape(RoundedRectangle(cornerRadius: bookCornerRadius,
+                                        style: .continuous))
         }
     }
 
-    /// 取某一页的渲染，越界则退回纸张
     @ViewBuilder
     private func pageOrPaper(book: Book, index: Int?, size: ReaderSize) -> some View {
         if let index, book.pages.indices.contains(index) {
@@ -363,7 +372,7 @@ struct BookReaderView: View {
         }
     }
 
-    // MARK: - 尺寸计算
+    // MARK: - 尺寸
 
     struct ReaderSize {
         var pageWidth: CGFloat
@@ -372,14 +381,11 @@ struct BookReaderView: View {
         var containerHeight: CGFloat
     }
 
-    /// 让书尽量占满可用空间。
-    /// 编辑模式：完全铺满，不留白。
-    /// 浏览模式：留一点点边距，让圆角与投影可见。
     private func readerSize(in container: CGSize, book: Book) -> ReaderSize {
         let ratio = max(book.pageAspectRatio, 0.4)
 
-        let hInset: CGFloat = isPenActive ? 0 : 8
-        let vInset: CGFloat = isPenActive ? 0 : (viewMode == .spread ? 10 : 16)
+        let hInset: CGFloat = isPenActive ? 0 : 6
+        let vInset: CGFloat = isPenActive ? 0 : (viewMode == .spread ? 8 : 12)
 
         let availW = max(container.width - hInset * 2, 100)
         let availH = max(container.height - vInset * 2, 100)
@@ -410,7 +416,6 @@ struct BookReaderView: View {
     }
 
     private var bookCornerRadius: CGFloat {
-        // 浏览时明显圆角，编辑时收窄一点（避免削掉画面边缘）
         isPenActive ? 6 : 14
     }
 
@@ -433,15 +438,17 @@ struct BookReaderView: View {
             initialDrawing: drawingStore.load(bookId: book.id, spreadIndex: sIndex),
             pencilOnly: settings.pencilOnlyDrawMode,
             tool: currentTool,
+            toolSignature: toolSignature,
             undoTrigger: undoTrigger,
             redoTrigger: redoTrigger,
             clearTrigger: clearTrigger,
+            zoomResetTrigger: zoomResetTrigger,
             onDrawingChanged: { newDrawing in
                 drawingStore.save(newDrawing, bookId: book.id, spreadIndex: sIndex)
                 handleAutoAppend(book: book, spreadIndex: sIndex, drawing: newDrawing)
             },
-            onDrawingStateChanged: { drawing in
-                isDrawingNow = drawing
+            onDrawingStateChanged: { _ in
+                // 目前不需要额外处理；保留回调以便将来扩展
             }
         )
         .frame(width: logical.width, height: logical.height)
@@ -453,25 +460,29 @@ struct BookReaderView: View {
                 canvas.offset(x: showRightHalf ? -size.pageWidth : 0)
             }
             .clipped()
-            .allowsHitTesting(true)
     }
 
+    // MARK: - 工具构造
+
     private var currentTool: PKTool {
-        switch penKind {
+        switch activeTool {
+        case .brush(let kind):
+            let ui = UIColor(penColor).withAlphaComponent(kind.alpha)
+            let width = penWidth.value * kind.widthMultiplier
+            return PKInkingTool(kind.inkType, color: ui, width: width)
         case .eraser:
-            return PKEraserTool(.vector)
-        case .pen:
-            return PKInkingTool(.pen,
-                                color: UIColor(penColorEnum.color),
-                                width: penWidth.rawValue)
-        case .marker:
-            return PKInkingTool(.marker,
-                                color: UIColor(penColorEnum.color).withAlphaComponent(0.55),
-                                width: penWidth.rawValue * 2.5)
-        case .pencil:
-            return PKInkingTool(.pencil,
-                                color: UIColor(penColorEnum.color),
-                                width: penWidth.rawValue)
+            return PKEraserTool(eraserKind.pkType, width: eraserWidth.value)
+        }
+    }
+
+    /// ⚠️ 必须是稳定字符串。工具签名一变，画布就会重设工具，
+    ///    在落笔过程中重设会打断笔迹渲染。
+    private var toolSignature: String {
+        switch activeTool {
+        case .brush(let kind):
+            return "brush|\(kind.rawValue)|\(stableColorKey(penColor))|\(penWidth.rawValue)"
+        case .eraser:
+            return "eraser|\(eraserKind.rawValue)|\(eraserWidth.rawValue)"
         }
     }
 
@@ -492,65 +503,68 @@ struct BookReaderView: View {
 
     // MARK: - 手势
 
-    /// 编辑且"手指也能画"时，手指要留给画笔，不能翻页
     private var pagingEnabled: Bool {
         !(isPenActive && !settings.pencilOnlyDrawMode)
     }
 
-    /// 边缘点击翻页：编辑模式下只在"仅笔"时启用，避免挡住绘制
     private var edgeTapActive: Bool {
         settings.edgeTapTurn && (!isPenActive || settings.pencilOnlyDrawMode)
     }
 
-    private var turnGesture: some Gesture {
-        DragGesture(minimumDistance: 12)
+    /// 滑动 = 连续翻多页
+    private func turnGesture(available: CGSize) -> some Gesture {
+        DragGesture(minimumDistance: 10)
             .onChanged { value in
                 guard pagingEnabled, let book else { return }
-                guard !isFlipping else { return }
-
                 let dx = value.translation.width
                 let dy = value.translation.height
-                guard abs(dx) > abs(dy) * 1.4 else { return }
+                guard abs(dx) > abs(dy) * 1.2 else { return }
 
                 let forward = shouldTurnForward(dx: dx)
-                let count = readerUnitCount(book: book)
-                let clamped = min(max(unitIndex, 0), max(count - 1, 0))
-                let canTurn = forward ? clamped < count - 1 : clamped > 0
-                guard canTurn else { return }
+                let steps = Int(abs(dx) / swipeStepPoints)
 
-                if !isFlipping {
-                    flipFromIndex = clamped
+                if steps > dragStepsApplied {
+                    let extra = steps - dragStepsApplied
+                    dragStepsApplied = steps
+                    flipForward = forward
+                    pendingFlips += extra
+                    if !flipLoopRunning {
+                        stepFlip(book: book)
+                    }
+                    playHaptic()
                 }
-                flipForward = forward
-                isFlipping = true
-                flipProgress = min(max(abs(dx) / 260, 0), 1)
             }
-            .onEnded { _ in
+            .onEnded { value in
                 guard let book else {
                     resetFlip()
                     return
                 }
-                guard isFlipping else {
-                    flipProgress = 0
-                    return
+
+                // 没翻过、或者只是快速轻扫 —— 按预测位移补上
+                let predicted = abs(value.predictedEndTranslation.width)
+                let predictedSteps = Int(predicted / swipeStepPoints)
+                let extra = max(0, predictedSteps - dragStepsApplied)
+
+                if extra > 0 {
+                    let capped = min(extra, maxFlipPerSwipe)
+                    let forward = shouldTurnForward(
+                        dx: value.translation.width != 0
+                            ? value.translation.width
+                            : value.predictedEndTranslation.width
+                    )
+                    flipForward = forward
+                    pendingFlips += capped
+                    if !flipLoopRunning {
+                        stepFlip(book: book)
+                    }
+                } else if dragStepsApplied == 0 && pendingFlips == 0 {
+                    // 极轻的一次滑动：至少翻一页
+                    flipForward = shouldTurnForward(dx: value.translation.width)
+                    pendingFlips = 1
+                    stepFlip(book: book)
                 }
 
-                if flipProgress > commitThreshold {
-                    let remaining = flipDuration * Double(1 - flipProgress)
-                    withAnimation(.easeOut(duration: max(remaining, 0.08))) {
-                        flipProgress = 1
-                    }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + max(remaining, 0.08)) {
-                        finishFlip(book: book)
-                    }
-                } else {
-                    withAnimation(.easeOut(duration: 0.26)) {
-                        flipProgress = 0
-                    }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.26) {
-                        isFlipping = false
-                    }
-                }
+                dragStepsApplied = 0
             }
     }
 
@@ -559,62 +573,69 @@ struct BookReaderView: View {
         return direction == .leftToRight ? (dx < 0) : (dx > 0)
     }
 
-    @ViewBuilder
-    private func edgeTapZone(alignment: Alignment, book: Book) -> some View {
-        if edgeTapActive {
-            Color.clear
-                .contentShape(Rectangle())
-                .frame(width: 72)
-                .frame(maxHeight: .infinity)
-                .onTapGesture {
-                    if alignment == .leading {
-                        goBackward()
-                    } else {
-                        goForward()
-                    }
+    /// 点边缘翻页：用坐标判断，不占位、不吃手势
+    private func edgeTapGesture(available: CGSize) -> some Gesture {
+        SpatialTapGesture()
+            .onEnded { value in
+                guard edgeTapActive else { return }
+                let w = available.width
+                let x = value.location.x
+                if x < w * 0.16 {
+                    requestSingleFlip(forward: false)
+                } else if x > w * 0.84 {
+                    requestSingleFlip(forward: true)
                 }
-        }
+            }
     }
 
     // MARK: - 翻页执行
 
-    private func beginFlip(forward: Bool, book: Book) {
-        let count = readerUnitCount(book: book)
-        let clamped = min(max(unitIndex, 0), max(count - 1, 0))
-        let canTurn = forward ? clamped < count - 1 : clamped > 0
-        guard canTurn, !isFlipping else { return }
-
-        flipFromIndex = clamped
+    private func requestSingleFlip(forward: Bool) {
+        guard let book else { return }
+        guard !flipLoopRunning else { return }
         flipForward = forward
+        pendingFlips = 1
+        stepFlip(book: book)
+    }
+
+    /// 消费翻页队列：一次翻一页，用短动画连播
+    private func stepFlip(book: Book) {
+        let total = readerUnitCount(book: book)
+        let next = flipForward ? unitIndex + 1 : unitIndex - 1
+
+        guard pendingFlips > 0, next >= 0, next < total else {
+            pendingFlips = 0
+            flipLoopRunning = false
+            isFlipping = false
+            flipProgress = 0
+            return
+        }
+
+        pendingFlips -= 1
+        flipLoopRunning = true
+        flipFromIndex = unitIndex
         isFlipping = true
         flipProgress = 0
 
-        playHaptic()
-
-        withAnimation(.easeInOut(duration: flipDuration)) {
+        withAnimation(.easeInOut(duration: flipStepDuration)) {
             flipProgress = 1
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + flipDuration) {
-            finishFlip(book: book)
-        }
-    }
 
-    private func finishFlip(book: Book) {
-        var t = Transaction()
-        t.disablesAnimations = true
-        withTransaction(t) {
-            if flipForward {
-                unitIndex = min(flipFromIndex + 1, max(readerUnitCount(book: book) - 1, 0))
-            } else {
-                unitIndex = max(flipFromIndex - 1, 0)
+        DispatchQueue.main.asyncAfter(deadline: .now() + flipStepDuration) {
+            var t = Transaction()
+            t.disablesAnimations = true
+            withTransaction(t) {
+                unitIndex = next
+                flipProgress = 0
             }
-            flipProgress = 0
-            isFlipping = false
+            stepFlip(book: book)
         }
-        didAutoAppend = false
     }
 
     private func resetFlip() {
+        pendingFlips = 0
+        flipLoopRunning = false
+        dragStepsApplied = 0
         var t = Transaction()
         t.disablesAnimations = true
         withTransaction(t) {
@@ -624,31 +645,18 @@ struct BookReaderView: View {
     }
 
     private func playHaptic() {
-        guard settings.pageTurnSound else {
-            // 默认静音：不发声，只给轻微触觉
-            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            return
-        }
-        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
     }
 
     // MARK: - 导航
 
-    private func goForward() {
-        guard let book else { return }
-        guard !isFlipping else { return }
-        beginFlip(forward: true, book: book)
-    }
+    private func goForward() { requestSingleFlip(forward: true) }
+    private func goBackward() { requestSingleFlip(forward: false) }
 
-    private func goBackward() {
-        guard let book else { return }
-        guard !isFlipping else { return }
-        beginFlip(forward: false, book: book)
-    }
-
-    private func clampPosition() {
+    private func clampAfterEdit() {
         guard let book else { return }
         unitIndex = min(max(unitIndex, 0), max(readerUnitCount(book: book) - 1, 0))
+        resetFlip()
     }
 
     private func initialize(container: CGSize) {
@@ -700,44 +708,32 @@ struct BookReaderView: View {
     private func bottomBar(book: Book) -> some View {
         let count = readerUnitCount(book: book)
 
-        VStack(spacing: 2) {
-            ScrubberView(count: count,
-                         index: unitIndex,
-                         scrubbing: $scrubbing) { target in
-                resetFlip()
-                unitIndex = min(max(target, 0), max(count - 1, 0))
+        HStack(spacing: 14) {
+            Button { goBackward() } label: {
+                Image(systemName: "chevron.backward")
+                    .font(.system(size: 13, weight: .semibold))
             }
-            .padding(.horizontal, 22)
+            .disabled(unitIndex <= 0 || flipLoopRunning)
 
-            HStack(spacing: 14) {
-                Button { goBackward() } label: {
-                    Image(systemName: "chevron.backward")
-                        .font(.system(size: 13, weight: .semibold))
-                }
-                .disabled(unitIndex <= 0 || isFlipping)
-
-                Button { goForward() } label: {
-                    Image(systemName: "chevron.forward")
-                        .font(.system(size: 13, weight: .semibold))
-                }
-                .disabled(unitIndex >= count - 1 || isFlipping)
-
-                Spacer()
-
-                // 页码：右下角，小号
-                Text(positionText(book: book))
-                    .font(.system(size: 10, weight: .medium).monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.75))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(Color.black.opacity(0.38), in: Capsule())
+            Button { goForward() } label: {
+                Image(systemName: "chevron.forward")
+                    .font(.system(size: 13, weight: .semibold))
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.white)
-            .padding(.horizontal, 24)
+            .disabled(unitIndex >= count - 1 || flipLoopRunning)
+
+            Spacer()
+
+            Text(positionText(book: book))
+                .font(.system(size: 10, weight: .medium).monospacedDigit())
+                .foregroundStyle(.white.opacity(0.75))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(Color.black.opacity(0.38), in: Capsule())
         }
-        .padding(.bottom, 6)
-        .opacity(isFlipping ? 0.6 : 1)
+        .buttonStyle(.plain)
+        .foregroundStyle(.white)
+        .padding(.horizontal, 24)
+        .padding(.bottom, 10)
     }
 
     private func positionText(book: Book) -> String {
@@ -753,144 +749,114 @@ struct BookReaderView: View {
         }
     }
 
-    // MARK: - 拖动进度条时的浮层预览
-
-    @ViewBuilder
-    private func scrubPreview(book: Book, size: ReaderSize) -> some View {
-        if let target = scrubbing, !book.pages.isEmpty {
-            VStack(spacing: 10) {
-                Text(previewLabel(book: book, unit: target))
-                    .font(.headline)
-                    .foregroundStyle(.white)
-
-                Group {
-                    if viewMode == .spread {
-                        let spreads = SpreadLayout.spreads(for: book)
-                        if spreads.indices.contains(target) {
-                            SpreadCanvasView(book: book,
-                                             spread: spreads[target],
-                                             pageWidth: size.pageWidth,
-                                             pageHeight: size.pageHeight,
-                                             drawingRevision: drawingStore.revision,
-                                             showDrawing: true,
-                                             theme: theme)
-                        }
-                    } else if book.pages.indices.contains(target) {
-                        SinglePageView(book: book,
-                                       pageIndex: target,
-                                       pageWidth: size.pageWidth,
-                                       pageHeight: size.pageHeight,
-                                       drawingRevision: drawingStore.revision,
-                                       showDrawing: true,
-                                       theme: theme)
-                    }
-                }
-                .frame(width: previewSize(size: size).width,
-                       height: previewSize(size: size).height)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .shadow(color: .black.opacity(0.5), radius: 12)
-            }
-            .padding(16)
-            .background(.ultraThinMaterial,
-                        in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-            .shadow(color: .black.opacity(0.45), radius: 24)
-            .allowsHitTesting(false)
-        }
-    }
-
-    private func previewSize(size: ReaderSize) -> CGSize {
-        let maxW: CGFloat = viewMode == .spread ? 340 : 230
-        let maxH: CGFloat = 380
-        let w = min(size.containerWidth, maxW)
-        let h = w * (size.containerHeight / max(size.containerWidth, 1))
-        if h > maxH {
-            return CGSize(width: w * (maxH / h), height: maxH)
-        }
-        return CGSize(width: w, height: h)
-    }
-
-    private func previewLabel(book: Book, unit: Int) -> String {
-        if viewMode == .spread {
-            let count = SpreadLayout.spreads(for: book).count
-            let clamped = min(max(unit, 0), max(count - 1, 0))
-            let start = clamped * 2 + 1
-            let end = min(start + 1, book.pages.count)
-            return "跨页 \(start)-\(end)"
-        } else {
-            return "第 \(min(max(unit, 0), max(book.pages.count - 1, 0)) + 1) 页"
-        }
-    }
-
     // MARK: - 笔工具栏
 
     private var penToolbar: some View {
-        HStack(spacing: 11) {
-            ForEach(PenKind.allCases, id: \.self) { kind in
-                Button { penKind = kind } label: {
-                    Image(systemName: kind.systemImage)
-                        .font(.system(size: 15))
-                        .frame(width: 32, height: 32)
-                        .background(penKind == kind
-                                    ? Color.accentColor.opacity(0.34)
-                                    : Color.clear)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 10) {
+                // 三种笔
+                ForEach(PenKind.allCases) { kind in
+                    toolButton(isActive: activeTool == .brush(kind),
+                               systemImage: kind.systemImage,
+                               label: kind.displayName) {
+                        activeTool = .brush(kind)
+                    }
                 }
-                .buttonStyle(.plain)
-            }
 
-            Divider().frame(height: 18)
+                Divider().frame(height: 20)
 
-            HStack(spacing: 7) {
-                ForEach(PenColor.allCases, id: \.self) { c in
+                // 橡皮：点开弹窗
+                toolButton(isActive: activeTool.isEraser,
+                           systemImage: eraserKind.systemImage,
+                           label: "橡皮") {
+                    activeTool = .eraser
+                    showEraserPanel = true
+                }
+
+                Divider().frame(height: 20)
+
+                // 预设颜色
+                ForEach(PenColorPreset.allCases) { preset in
                     Circle()
-                        .fill(c.color)
-                        .frame(width: 20, height: 20)
+                        .fill(preset.color)
+                        .frame(width: 19, height: 19)
                         .overlay(
                             Circle().stroke(
-                                Color.white.opacity(penColorEnum == c ? 0.95 : 0.14),
-                                lineWidth: penColorEnum == c ? 2.5 : 1
+                                Color.white.opacity(penColor == preset.color
+                                                    ? 0.95 : 0.16),
+                                lineWidth: penColor == preset.color ? 2.5 : 1
                             )
                         )
-                        .onTapGesture { penColorEnum = c }
+                        .onTapGesture { penColor = preset.color }
                 }
-            }
-            .opacity(penKind == .eraser ? 0.28 : 1)
-            .allowsHitTesting(penKind != .eraser)
 
-            Divider().frame(height: 18)
+                // 自定义颜色
+                ColorPicker("", selection: $customColor, supportsOpacity: false)
+                    .labelsHidden()
+                    .frame(width: 26, height: 26)
+                    .onChange(of: customColor) { newValue in
+                        penColor = newValue
+                    }
 
-            ForEach(PenWidth.allCases, id: \.self) { w in
-                Button { penWidth = w } label: {
-                    Circle()
-                        .fill(Color.white.opacity(0.9))
-                        .frame(width: w.dotSize, height: w.dotSize)
-                        .frame(width: 26, height: 26)
-                        .background(penWidth == w
-                                    ? Color.accentColor.opacity(0.22)
-                                    : Color.clear)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                Divider().frame(height: 20)
+
+                // 粗细（6 档）
+                ForEach(PenWidth.allCases) { w in
+                    Button {
+                        penWidth = w
+                    } label: {
+                        Circle()
+                            .fill(Color.white.opacity(0.9))
+                            .frame(width: w.dotSize, height: w.dotSize)
+                            .frame(width: 26, height: 26)
+                            .background(penWidth == w
+                                        ? Color.accentColor.opacity(0.25)
+                                        : Color.clear)
+                            .clipShape(RoundedRectangle(cornerRadius: 7))
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
-            }
 
-            Divider().frame(height: 18)
+                Divider().frame(height: 20)
 
-            Button { undoTrigger += 1 } label: {
-                Image(systemName: "arrow.uturn.backward")
+                // 撤销 / 重做 / 清空 / 缩放复位
+                toolButton(isActive: false,
+                           systemImage: "arrow.uturn.backward",
+                           label: "撤销") { undoTrigger += 1 }
+                toolButton(isActive: false,
+                           systemImage: "arrow.uturn.forward",
+                           label: "重做") { redoTrigger += 1 }
+                toolButton(isActive: false,
+                           systemImage: "trash",
+                           label: "清空") { clearTrigger += 1 }
+                toolButton(isActive: false,
+                           systemImage: "arrow.up.left.and.arrow.down.right",
+                           label: "100%") { zoomResetTrigger += 1 }
             }
-            Button { redoTrigger += 1 } label: {
-                Image(systemName: "arrow.uturn.forward")
-            }
-            Button { clearTrigger += 1 } label: {
-                Image(systemName: "trash")
-            }
+            .padding(.vertical, 8)
+            .padding(.horizontal, 14)
         }
-        .font(.system(size: 14))
-        .foregroundStyle(.white)
-        .padding(.vertical, 8)
-        .padding(.horizontal, 14)
-        .background(Color.black.opacity(0.68), in: Capsule())
+        .frame(maxWidth: 760)
+        .background(Color.black.opacity(0.70), in: Capsule())
         .overlay(Capsule().stroke(Color.white.opacity(0.10), lineWidth: 0.5))
+    }
+
+    @ViewBuilder
+    private func toolButton(isActive: Bool,
+                            systemImage: String,
+                            label: String,
+                            action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 15))
+                .foregroundStyle(.white)
+                .frame(width: 32, height: 32)
+                .background(isActive
+                            ? Color.accentColor.opacity(0.36)
+                            : Color.clear)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - 导航栏工具栏
@@ -900,7 +866,6 @@ struct BookReaderView: View {
         ToolbarItemGroup(placement: .navigationBarTrailing) {
             Button {
                 isPenActive.toggle()
-                isDrawingNow = false
                 if isPenActive { resetFlip() }
             } label: {
                 Image(systemName: isPenActive ? "pencil.circle.fill" : "pencil.circle")
@@ -1058,5 +1023,112 @@ struct BookReaderView: View {
         } else {
             unitIndex = startIndex
         }
+    }
+}
+
+// MARK: - 橡皮面板
+
+struct EraserPanel: View {
+    @Binding var kind: EraserKind
+    @Binding var width: EraserWidth
+    let onClose: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack {
+                Text("橡皮")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    onClose()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+
+            VStack(spacing: 10) {
+                ForEach(EraserKind.allCases) { k in
+                    Button {
+                        kind = k
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: k.systemImage)
+                                .font(.system(size: 18))
+                                .frame(width: 28)
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(k.displayName)
+                                    .font(.subheadline.weight(.medium))
+                                Text(k.descriptionText)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Spacer()
+
+                            if kind == k {
+                                Image(systemName: "checkmark")
+                                    .foregroundStyle(Color.accentColor)
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .background(kind == k
+                                    ? Color.accentColor.opacity(0.12)
+                                    : Color.clear,
+                                    in: RoundedRectangle(cornerRadius: 10))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .stroke(kind == k
+                                        ? Color.accentColor.opacity(0.5)
+                                        : Color.secondary.opacity(0.18),
+                                        lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text("橡皮大小")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.secondary)
+
+                HStack(spacing: 12) {
+                    ForEach(EraserWidth.allCases) { w in
+                        Button {
+                            width = w
+                        } label: {
+                            VStack(spacing: 6) {
+                                Circle()
+                                    .fill(Color.primary.opacity(0.85))
+                                    .frame(width: w.dotSize, height: w.dotSize)
+                                    .frame(width: 44, height: 44)
+                                    .background(width == w
+                                                ? Color.accentColor.opacity(0.18)
+                                                : Color.clear,
+                                                in: RoundedRectangle(cornerRadius: 10))
+                                Text(w.displayName)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
+            Text(kind == .vector
+                 ? "矢量橡皮会整笔删除，大小设置不影响它。"
+                 : "精确橡皮只擦掉笔尖经过的位置。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(20)
+        .frame(width: 330)
     }
 }
