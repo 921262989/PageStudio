@@ -1,6 +1,7 @@
 import SwiftUI
 
-/// 居中排成一排的书架。左右滑动选择，中间那本最大。
+/// 居中的书架：中间一本最大，两侧依次缩小并淡出。
+/// 左右滑动切换，点中间的打开，长按弹出菜单。
 struct BookCarousel: View {
     let books: [Book]
     @Binding var index: Int
@@ -10,53 +11,29 @@ struct BookCarousel: View {
     let onRename: (Book) -> Void
     let onDelete: (Book) -> Void
 
-    @GestureState private var drag: CGFloat = 0
+    @State private var dragOffset: CGFloat = 0
 
     var body: some View {
         GeometryReader { geo in
             let width = geo.size.width
             let height = geo.size.height
-            let itemWidth = min(width * 0.46, 380)
-            let step = itemWidth * 1.20
+            let itemWidth = min(width * 0.44, 360)
+            let itemHeight = itemWidth * 1.38
+            let step = itemWidth * 1.22
 
             ZStack {
                 ForEach(Array(books.enumerated()), id: \.element.id) { idx, book in
-                    let x = CGFloat(idx - index) * step + drag
+                    let x = CGFloat(idx - index) * step + dragOffset
 
-                    if abs(x) < step * 5 || drag != 0 {
-                        cover(book: book, isCentered: idx == index)
-                            .frame(width: itemWidth, height: itemWidth * 1.38)
+                    if abs(x) < step * 5 {
+                        cover(book: book,
+                              idx: idx,
+                              itemWidth: itemWidth,
+                              itemHeight: itemHeight)
                             .scaleEffect(scale(for: abs(x) / step))
                             .opacity(opacity(for: abs(x) / step))
                             .offset(x: x)
-                            .zIndex(Double(1000 - abs(x)))
-                            .onTapGesture {
-                                if idx == index {
-                                    onOpen(book)
-                                } else {
-                                    withAnimation(.spring(response: 0.38,
-                                                          dampingFraction: 0.82)) {
-                                        index = idx
-                                    }
-                                }
-                            }
-                            .contextMenu {
-                                Button {
-                                    onCover(book)
-                                } label: {
-                                    Label("更换封面", systemImage: "paintpalette")
-                                }
-                                Button {
-                                    onRename(book)
-                                } label: {
-                                    Label("重命名", systemImage: "pencil")
-                                }
-                                Button(role: .destructive) {
-                                    onDelete(book)
-                                } label: {
-                                    Label("删除", systemImage: "trash")
-                                }
-                            }
+                            .zIndex(1000 - Double(abs(x)))
                     }
                 }
             }
@@ -64,8 +41,8 @@ struct BookCarousel: View {
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 12)
-                    .updating($drag) { value, state, _ in
-                        state = value.translation.width
+                    .onChanged { value in
+                        dragOffset = value.translation.width
                     }
                     .onEnded { value in
                         guard !books.isEmpty else { return }
@@ -73,12 +50,49 @@ struct BookCarousel: View {
                         let moved = -predicted / step
                         let target = index + Int(moved.rounded())
                         let clamped = min(max(target, 0), books.count - 1)
-                        withAnimation(.spring(response: 0.42, dampingFraction: 0.84)) {
+
+                        withAnimation(.spring(response: 0.42, dampingFraction: 0.85)) {
                             index = clamped
+                            dragOffset = 0
                         }
                     }
             )
         }
+    }
+
+    @ViewBuilder
+    private func cover(book: Book,
+                       idx: Int,
+                       itemWidth: CGFloat,
+                       itemHeight: CGFloat) -> some View {
+        NotebookCoverView(book: book, width: itemWidth)
+            .frame(width: itemWidth, height: itemHeight)
+            .onTapGesture {
+                if idx == index {
+                    onOpen(book)
+                } else {
+                    withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
+                        index = idx
+                    }
+                }
+            }
+            .contextMenu {
+                Button {
+                    onCover(book)
+                } label: {
+                    Label("更换封面", systemImage: "paintpalette")
+                }
+                Button {
+                    onRename(book)
+                } label: {
+                    Label("重命名", systemImage: "pencil")
+                }
+                Button(role: .destructive) {
+                    onDelete(book)
+                } label: {
+                    Label("删除", systemImage: "trash")
+                }
+            }
     }
 
     private func scale(for distance: CGFloat) -> CGFloat {
@@ -86,38 +100,6 @@ struct BookCarousel: View {
     }
 
     private func opacity(for distance: CGFloat) -> Double {
-        Double(max(0.20, 1 - distance * 0.42))
-    }
-
-    @ViewBuilder
-    private func cover(book: Book, isCentered: Bool) -> some View {
-        ZStack {
-            NotebookCoverView(book: book, width: 1)
-                .scaleEffect(1, anchor: .center)
-
-            // NotebookCoverView 需要明确宽度，这里用 GeometryReader 兜一层
-            GeometryReader { g in
-                NotebookCoverView(book: book, width: g.size.width)
-            }
-        }
-        .overlay(alignment: .bottom) {
-            if isCentered {
-                VStack(spacing: 3) {
-                    Text(book.title)
-                        .font(.headline)
-                        .lineLimit(1)
-                    HStack(spacing: 6) {
-                        Text("\(book.pages.count) 页")
-                        if !book.outline.isEmpty {
-                            Text("·")
-                            Text("\(book.outline.count) 条目")
-                        }
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                }
-                .offset(y: 40)
-            }
-        }
+        Double(max(0.18, 1 - distance * 0.45))
     }
 }
