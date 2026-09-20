@@ -4,6 +4,7 @@ struct LibraryView: View {
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var settingsStore: AppSettingsStore
 
+    @State private var path = NavigationPath()
     @State private var showNewBookAlert = false
     @State private var newBookTitle = ""
     @State private var bookToRename: Book?
@@ -11,15 +12,14 @@ struct LibraryView: View {
     @State private var showSettings = false
     @State private var coverEditingBook: Book?
     @State private var carouselIndex = 0
-    @State private var openBookID: UUID?
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             Group {
                 if library.books.isEmpty {
                     emptyState
                 } else {
-                    carouselShelf
+                    shelf
                 }
             }
             .navigationTitle("我的书架")
@@ -65,9 +65,8 @@ struct LibraryView: View {
                 TextField("画册名称", text: $newBookTitle)
                 Button("取消", role: .cancel) {}
                 Button("创建") {
-                    let created = library.createBook(title: newBookTitle)
+                    library.createBook(title: newBookTitle)
                     carouselIndex = 0
-                    _ = created
                 }
             }
             .alert("重命名画册", isPresented: renameAlertBinding) {
@@ -98,12 +97,12 @@ struct LibraryView: View {
 
     // MARK: - 居中书架
 
-    private var carouselShelf: some View {
+    private var shelf: some View {
         VStack(spacing: 0) {
             BookCarousel(books: library.books,
                          index: $carouselIndex,
                          onOpen: { book in
-                             openBookID = book.id
+                             path.append(book.id)
                          },
                          onCover: { book in
                              coverEditingBook = book
@@ -116,23 +115,33 @@ struct LibraryView: View {
                              library.delete(book)
                          })
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            currentBookInfo
         }
-        .background(
-            NavigationLink(
-                isActive: Binding(
-                    get: { openBookID != nil },
-                    set: { if !$0 { openBookID = nil } }
-                ),
-                destination: {
-                    if let id = openBookID {
-                        BookReaderView(bookID: id)
+    }
+
+    @ViewBuilder
+    private var currentBookInfo: some View {
+        if library.books.indices.contains(carouselIndex) {
+            let book = library.books[carouselIndex]
+            VStack(spacing: 4) {
+                Text(book.title)
+                    .font(.headline)
+                    .lineLimit(1)
+
+                HStack(spacing: 6) {
+                    Text("\(book.pages.count) 页")
+                    if !book.outline.isEmpty {
+                        Text("·")
+                        Text("\(book.outline.count) 条目")
                     }
-                },
-                label: { EmptyView() }
-            )
-            .opacity(0)
-            .frame(width: 0, height: 0)
-        )
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 28)
+        }
     }
 
     private var emptyState: some View {
@@ -147,36 +156,6 @@ struct LibraryView: View {
                 showNewBookAlert = true
             }
             .buttonStyle(.borderedProminent)
-        }
-    }
-}
-
-// MARK: - 书架格子（列表样式，留给以后备用）
-
-struct BookCoverCell: View {
-    let book: Book
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            GeometryReader { geo in
-                NotebookCoverView(book: book, width: geo.size.width)
-            }
-            .aspectRatio(1.0 / 1.38, contentMode: .fit)
-
-            Text(book.title)
-                .font(.headline)
-                .lineLimit(1)
-                .foregroundStyle(.primary)
-
-            HStack(spacing: 6) {
-                Text("\(book.pages.count) 页")
-                if !book.outline.isEmpty {
-                    Text("·")
-                    Text("\(book.outline.count) 条目")
-                }
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
         }
     }
 }
