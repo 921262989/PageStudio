@@ -72,7 +72,6 @@ struct DrawingCanvas: UIViewRepresentable {
         scroll.maximumZoomScale = fit * 6
         scroll.setZoomScale(fit, animated: false)
 
-        // 系统自带的 pinch / pan 全部关掉（一个会崩，一个抢不过画布）
         scroll.pinchGestureRecognizer?.isEnabled = false
         scroll.panGestureRecognizer.isEnabled = false
 
@@ -81,6 +80,14 @@ struct DrawingCanvas: UIViewRepresentable {
         canvas.bounds = CGRect(origin: .zero, size: canvasSize)
         canvas.backgroundColor = .clear
         canvas.isOpaque = false
+
+        // ⚠️ 画布钉死在「亮色外观」。
+        // 整个阅读器是强制深色的（.preferredColorScheme(.dark)），
+        // 而 PKCanvasView 在深色外观下对笔迹的着色会和 PKDrawing.image() 不一致，
+        // 表现就是「编辑里看着是黑、画出来是白，退出编辑又正常」。
+        // 纸张本来就是白的，画布用亮色外观不会影响任何视觉效果。
+        canvas.overrideUserInterfaceStyle = .light
+
         canvas.drawing = initialDrawing
         canvas.tool = tool
         canvas.drawingPolicy = pencilOnly ? .pencilOnly : .anyInput
@@ -93,14 +100,8 @@ struct DrawingCanvas: UIViewRepresentable {
         canvas.panGestureRecognizer.isEnabled = false
         canvas.delegate = context.coordinator
 
-        // ⚠️⚠️ 这一行是这轮的核心修复。
-        //
-        // PKCanvasView 内部的 drawingGestureRecognizer 默认独占所有触摸，
-        // 外层 ScrollView 上的捏合 / 双指拖动根本抢不到 →
-        // 双指按下去毫无反应。
-        //
-        // 把它的 delegate 指过来，并在 delegate 里明确返回
-        // "可以和其他手势同时识别"，双指手势才能收到触摸。
+        // 画布自带的画图手势默认独占触摸，必须允许它和其他手势同时识别，
+        // 否则外层的捏合 / 双指拖动收不到触摸。
         canvas.drawingGestureRecognizer.delegate = context.coordinator
 
         scroll.addSubview(canvas)
@@ -110,6 +111,7 @@ struct DrawingCanvas: UIViewRepresentable {
         context.coordinator.canvas = canvas
         context.coordinator.lastToolSignature = toolSignature
         context.coordinator.initialOffsetX = initialOffsetX
+        context.coordinator.lastInitialOffsetX = initialOffsetX
 
         applyInitialOffset(scroll, fit: fit, animated: false, in: context.coordinator)
 
@@ -216,28 +218,43 @@ struct DrawingCanvas: UIViewRepresentable {
         context.coordinator.spreadIndex = spreadIndex
         context.coordinator.displaySize = displaySize
 
-        if scroll.bounds.size != viewportSize {
+        // ⚠️ 视口尺寸比较必须带容差。
+        // 用 != 精确比较时，浮点误差会让这个分支几乎每次界面重算都成立，
+        // 于是你捏合放大后一松手就被打回 100%。
+        let viewportChanged =
+            abs(scroll.bounds.width - viewportSize.width) > 0.5 ||
+            abs(scroll.bounds.height - viewportSize.height) > 0.5
+
+        if viewportChanged {
             scroll.frame = CGRect(origin: .zero, size: viewportSize)
             scroll.bounds = CGRect(origin: .zero, size: viewportSize)
             scroll.minimumZoomScale = fit
             scroll.maximumZoomScale = fit * 6
             scroll.setZoomScale(fit, animated: false)
-            applyInitialOffset(scroll, fit: fit, animated: false, in: context.coordinator)
+            scroll.contentOffset = CGPoint(x: clampedOffset(fit: fit), y: 0)
+            context.coordinator.lastAppliedOffsetX = scroll.contentOffset.x
+            context.coordinator.lastInitialOffsetX = initialOffsetX
             context.coordinator.publishZoom(1, force: true)
         }
 
-        if canvas.bounds.size != canvasSize {
+        if abs(canvas.bounds.width - canvasSize.width) > 0.5 ||
+           abs(canvas.bounds.height - canvasSize.height) > 0.5 {
             canvas.frame = CGRect(origin: .zero, size: canvasSize)
             canvas.bounds = CGRect(origin: .zero, size: canvasSize)
             scroll.contentSize = canvasSize
         }
 
-        let wantedOffset = clampedOffset(fit: scroll.zoomScale)
-        if abs(context.coordinator.lastAppliedOffsetX - wantedOffset) > 0.5 {
-            scroll.setZoomScale(fit, animated: false)
-            scroll.contentOffset = CGPoint(x: wantedOffset, y: 0)
-            context.coordinator.lastAppliedOffsetX = wantedOffset
-            context.coordinator.publishZoom(1, force: true)
+        // ⚠️ 只有「单页模式切换左右页」才需要动横向偏移。
+        // 以前这里是拿当前 zoomScale 反推偏移、对不上就 setZoomScale(fit)，
+        // 结果就是每次界面重算都把缩放打回 100%。现在绝不动缩放。
+        if abs(context.coordinator.lastInitialOffsetX - initialOffsetX) > 0.5 {
+            context.coordinator.lastInitialOffsetX = initialOffsetX
+
+            let z = scroll.zoomScale
+            let maxOffset = max(canvasSize.width * z - viewportSize.width, 0)
+            let x = min(max(initialOffsetX * z, 0), maxOffset)
+            scroll.contentOffset = CGPoint(x: x, y: 0)
+            context.coordinator.lastAppliedOffsetX = x
         }
 
         let policy: PKCanvasViewDrawingPolicy = pencilOnly ? .pencilOnly : .anyInput
@@ -344,6 +361,9 @@ struct DrawingCanvas: UIViewRepresentable {
         var lastZoomOutTrigger: Int = 0
         var lastAppliedOffsetX: CGFloat = -1
 
+        /// 上一次的初始偏移（单页模式左右页）。只有它真的变了才调整偏移。
+        var lastInitialOffsetX: CGFloat = -1
+
         weak var customPinch: UIPinchGestureRecognizer?
         weak var twoFingerPan: UIPanGestureRecognizer?
         weak var twoFingerTap: UITapGestureRecognizer?
@@ -386,11 +406,8 @@ struct DrawingCanvas: UIViewRepresentable {
         func scrollViewDidEndZooming(_ scrollView: UIScrollView,
                                      with view: UIView?,
                                      atScale scale: CGFloat) {
-            let fit = scrollView.minimumZoomScale
-            let ratio = fit > 0 ? scale / fit : 1
-            if abs(ratio - 1) < 0.06, ratio != 1 {
-                scrollView.setZoomScale(fit, animated: true)
-            }
+            // ⚠️ 这里以前有一句「接近 100% 就吸回去」，
+            //    那会让手动捏合的缩放被系统悄悄打回 100%。已删除。
             reportZoom(scrollView)
         }
 
@@ -490,8 +507,8 @@ struct DrawingCanvas: UIViewRepresentable {
             }
         }
 
-        /// 双指手势进行中时，临时关掉画布自己的画图手势：
-        /// 一是把触摸让给捏合 / 拖动，二是避免"第一根手指先在纸上划一道"。
+        /// 双指手势进行中时临时关掉画布自己的画图手势：
+        /// 让触摸给捏合 / 拖动，也避免第一根手指先在纸上划一道。
         private func suspendDrawing(_ suspend: Bool) {
             guard let canvas else { return }
             guard drawingSuspended != suspend else { return }
@@ -503,7 +520,6 @@ struct DrawingCanvas: UIViewRepresentable {
 
         func gestureRecognizer(_ g: UIGestureRecognizer,
                                shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
-            // 必须 true：否则 PKCanvasView 的画图手势会把双指全部吃掉
             true
         }
 
