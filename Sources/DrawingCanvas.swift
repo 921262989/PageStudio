@@ -10,6 +10,10 @@ struct DrawingCanvas: UIViewRepresentable {
     var initialOffsetX: CGFloat = 0
     let displaySize: CGSize
 
+    /// 纸张位图（白纸 + 左右页图片）。
+    /// 它和笔迹放在同一个缩放容器里，所以双指放大时纸和字一起变大。
+    var paperImage: UIImage? = nil
+
     // 上下文
     let book: Book
     let spreadIndex: Int
@@ -75,17 +79,28 @@ struct DrawingCanvas: UIViewRepresentable {
         scroll.pinchGestureRecognizer?.isEnabled = false
         scroll.panGestureRecognizer.isEnabled = false
 
+        // ⚠️ 缩放容器：纸张和笔迹都得在这里面，才能一起变大。
+        //    以前 viewForZooming 返回的是画布本身，纸不在里面 → 只有笔迹放大。
+        let container = UIView(frame: CGRect(origin: .zero, size: canvasSize))
+        container.backgroundColor = .clear
+        container.clipsToBounds = true
+
+        if let paperImage {
+            let paper = UIImageView(image: paperImage)
+            paper.frame = CGRect(origin: .zero, size: canvasSize)
+            paper.contentMode = .scaleToFill
+            paper.isUserInteractionEnabled = false
+            container.addSubview(paper)
+            context.coordinator.paperView = paper
+        }
+
         let canvas = PKCanvasView()
         canvas.frame = CGRect(origin: .zero, size: canvasSize)
         canvas.bounds = CGRect(origin: .zero, size: canvasSize)
         canvas.backgroundColor = .clear
         canvas.isOpaque = false
 
-        // ⚠️ 画布钉死在「亮色外观」。
-        // 整个阅读器是强制深色的（.preferredColorScheme(.dark)），
-        // 而 PKCanvasView 在深色外观下对笔迹的着色会和 PKDrawing.image() 不一致，
-        // 表现就是「编辑里看着是黑、画出来是白，退出编辑又正常」。
-        // 纸张本来就是白的，画布用亮色外观不会影响任何视觉效果。
+        // 画布钉死在亮色外观，避免深色外观下笔迹着色和导出图不一致
         canvas.overrideUserInterfaceStyle = .light
 
         canvas.drawing = initialDrawing
@@ -100,15 +115,17 @@ struct DrawingCanvas: UIViewRepresentable {
         canvas.panGestureRecognizer.isEnabled = false
         canvas.delegate = context.coordinator
 
-        // 画布自带的画图手势默认独占触摸，必须允许它和其他手势同时识别，
-        // 否则外层的捏合 / 双指拖动收不到触摸。
+        // 画布自带的画图手势默认独占触摸，必须允许它和其他手势同时识别
         canvas.drawingGestureRecognizer.delegate = context.coordinator
 
-        scroll.addSubview(canvas)
+        container.addSubview(canvas)
+
+        scroll.addSubview(container)
         scroll.contentSize = canvasSize
 
         context.coordinator.scroll = scroll
         context.coordinator.canvas = canvas
+        context.coordinator.container = container
         context.coordinator.lastToolSignature = toolSignature
         context.coordinator.initialOffsetX = initialOffsetX
         context.coordinator.lastInitialOffsetX = initialOffsetX
@@ -218,9 +235,14 @@ struct DrawingCanvas: UIViewRepresentable {
         context.coordinator.spreadIndex = spreadIndex
         context.coordinator.displaySize = displaySize
 
-        // ⚠️ 视口尺寸比较必须带容差。
-        // 用 != 精确比较时，浮点误差会让这个分支几乎每次界面重算都成立，
-        // 于是你捏合放大后一松手就被打回 100%。
+        // 纸张图有更新就换上（换页 / 图片范围调整后）
+        if let paper = context.coordinator.paperView {
+            if paper.image !== paperImage {
+                paper.image = paperImage
+            }
+        }
+
+        // ⚠️ 尺寸比较必须带容差，否则浮点误差会每次重算都重置缩放
         let viewportChanged =
             abs(scroll.bounds.width - viewportSize.width) > 0.5 ||
             abs(scroll.bounds.height - viewportSize.height) > 0.5
@@ -244,9 +266,17 @@ struct DrawingCanvas: UIViewRepresentable {
             scroll.contentSize = canvasSize
         }
 
-        // ⚠️ 只有「单页模式切换左右页」才需要动横向偏移。
-        // 以前这里是拿当前 zoomScale 反推偏移、对不上就 setZoomScale(fit)，
-        // 结果就是每次界面重算都把缩放打回 100%。现在绝不动缩放。
+        if let container = context.coordinator.container,
+           abs(container.bounds.width - canvasSize.width) > 0.5 ||
+           abs(container.bounds.height - canvasSize.height) > 0.5 {
+            container.frame = CGRect(origin: .zero, size: canvasSize)
+            container.bounds = CGRect(origin: .zero, size: canvasSize)
+            context.coordinator.paperView?.frame = CGRect(origin: .zero,
+                                                          size: canvasSize)
+            scroll.contentSize = canvasSize
+        }
+
+        // 只有「单页模式切换左右页」才调整偏移，绝不动缩放
         if abs(context.coordinator.lastInitialOffsetX - initialOffsetX) > 0.5 {
             context.coordinator.lastInitialOffsetX = initialOffsetX
 
@@ -346,6 +376,8 @@ struct DrawingCanvas: UIViewRepresentable {
 
         weak var scroll: UIScrollView?
         weak var canvas: PKCanvasView?
+        weak var container: UIView?
+        weak var paperView: UIImageView?
 
         var book: Book?
         var spreadIndex: Int = 0
@@ -360,8 +392,6 @@ struct DrawingCanvas: UIViewRepresentable {
         var lastZoomInTrigger: Int = 0
         var lastZoomOutTrigger: Int = 0
         var lastAppliedOffsetX: CGFloat = -1
-
-        /// 上一次的初始偏移（单页模式左右页）。只有它真的变了才调整偏移。
         var lastInitialOffsetX: CGFloat = -1
 
         weak var customPinch: UIPinchGestureRecognizer?
@@ -395,8 +425,10 @@ struct DrawingCanvas: UIViewRepresentable {
 
         // MARK: 缩放
 
+        /// ⚠️ 返回的是「纸张 + 笔迹」的容器，不是画布本身。
+        /// 只返回画布的话，捏合时只有笔迹在变大，纸不动。
         func viewForZooming(in scrollView: UIScrollView) -> UIView? {
-            canvas
+            container ?? canvas
         }
 
         func scrollViewDidZoom(_ scrollView: UIScrollView) {
@@ -406,8 +438,6 @@ struct DrawingCanvas: UIViewRepresentable {
         func scrollViewDidEndZooming(_ scrollView: UIScrollView,
                                      with view: UIView?,
                                      atScale scale: CGFloat) {
-            // ⚠️ 这里以前有一句「接近 100% 就吸回去」，
-            //    那会让手动捏合的缩放被系统悄悄打回 100%。已删除。
             reportZoom(scrollView)
         }
 
@@ -507,8 +537,6 @@ struct DrawingCanvas: UIViewRepresentable {
             }
         }
 
-        /// 双指手势进行中时临时关掉画布自己的画图手势：
-        /// 让触摸给捏合 / 拖动，也避免第一根手指先在纸上划一道。
         private func suspendDrawing(_ suspend: Bool) {
             guard let canvas else { return }
             guard drawingSuspended != suspend else { return }
