@@ -10,8 +10,12 @@ struct DrawingCanvas: UIViewRepresentable {
     var initialOffsetX: CGFloat = 0
     let displaySize: CGSize
 
-    /// 纸张位图（白纸 + 左右页图片）
+    /// 纸张位图（白纸 + 内页样式 + 页面图片）
     var paperImage: UIImage? = nil
+    /// 纸张圆角（逻辑坐标，会跟着缩放一起变大）
+    var paperCornerRadius: CGFloat = 0
+    /// 纸张边框颜色
+    var paperBorderColor: UIColor = .clear
 
     // 上下文
     let book: Book
@@ -51,7 +55,7 @@ struct DrawingCanvas: UIViewRepresentable {
     let onPickColor: (Color) -> Void
     var onZoomChanged: (CGFloat) -> Void = { _ in }
 
-    /// ⚠️ 所有手势（包括系统自带的）都只接受「手指」触摸，Apple Pencil 一律排除。
+    /// ⚠️ 所有自定义手势只接受「手指」触摸，刻意排除 Apple Pencil。
     static let fingerOnly: [NSNumber] = [
         NSNumber(value: UITouch.TouchType.direct.rawValue)
     ]
@@ -82,10 +86,7 @@ struct DrawingCanvas: UIViewRepresentable {
         scroll.isOpaque = false
         scroll.contentInsetAdjustmentBehavior = .never
 
-        // ⚠️⚠️ 这两行是「单指 / 笔尖把画布拖走」的根治：
-        //   · isScrollEnabled = false → UIScrollView 自己的滚动彻底关掉
-        //   · 光设 panGestureRecognizer.isEnabled 不够，
-        //     系统会在布局变化时把它重新激活，所以还要关 isScrollEnabled
+        // 外层滚动彻底关掉（单指 / 笔尖都不会把画布拖走）
         scroll.isScrollEnabled = false
         scroll.bounces = false
         scroll.bouncesZoom = false
@@ -93,7 +94,7 @@ struct DrawingCanvas: UIViewRepresentable {
         scroll.showsVerticalScrollIndicator = false
         scroll.delegate = context.coordinator
 
-        // 系统手势就算被系统重新启用，也让它们碰不到 Apple Pencil
+        // 系统手势就算被系统重新启用，也碰不到 Apple Pencil
         scroll.panGestureRecognizer.isEnabled = false
         scroll.panGestureRecognizer.allowedTouchTypes = Self.fingerOnly
         scroll.pinchGestureRecognizer?.isEnabled = false
@@ -103,6 +104,7 @@ struct DrawingCanvas: UIViewRepresentable {
         scroll.maximumZoomScale = fit * 6
         scroll.setZoomScale(fit, animated: false)
 
+        // 缩放容器：纸张和笔迹都在这里面，才能一起变大
         let container = UIView(frame: CGRect(origin: .zero, size: canvasSize))
         container.backgroundColor = .clear
         container.clipsToBounds = true
@@ -112,6 +114,11 @@ struct DrawingCanvas: UIViewRepresentable {
             paper.frame = CGRect(origin: .zero, size: canvasSize)
             paper.contentMode = .scaleToFill
             paper.isUserInteractionEnabled = false
+            // 纸张自己的圆角 + 边框：按逻辑坐标算，放大时跟着一起变大
+            paper.layer.cornerRadius = max(paperCornerRadius, 0)
+            paper.layer.masksToBounds = true
+            paper.layer.borderWidth = 1.0 / max(fit, 0.0001)
+            paper.layer.borderColor = paperBorderColor.cgColor
             container.addSubview(paper)
             context.coordinator.paperView = paper
         }
@@ -127,7 +134,6 @@ struct DrawingCanvas: UIViewRepresentable {
         canvas.tool = tool
         canvas.drawingPolicy = pencilOnly ? .pencilOnly : .anyInput
 
-        // 画布自己是 UIScrollView 子类，它自带的滚动 / 缩放也全关掉
         canvas.isScrollEnabled = false
         canvas.minimumZoomScale = 1
         canvas.maximumZoomScale = 1
@@ -139,6 +145,7 @@ struct DrawingCanvas: UIViewRepresentable {
         canvas.pinchGestureRecognizer?.allowedTouchTypes = Self.fingerOnly
 
         canvas.delegate = context.coordinator
+        // 让画布的画图手势和外层手势能共存
         canvas.drawingGestureRecognizer.delegate = context.coordinator
 
         container.addSubview(canvas)
@@ -286,7 +293,7 @@ struct DrawingCanvas: UIViewRepresentable {
 
         let fit = fitScale
 
-        // 系统手势可能被系统重新激活 —— 每次都把它们按住
+        // 系统手势可能被系统重新激活 —— 每次都按住它们
         scroll.isScrollEnabled = false
         scroll.panGestureRecognizer.isEnabled = false
         scroll.pinchGestureRecognizer?.isEnabled = false
@@ -308,10 +315,15 @@ struct DrawingCanvas: UIViewRepresentable {
         context.coordinator.pagePanWanted = pagePanEnabled
         context.coordinator.pageTapWanted = pageTapEnabled
 
+        // 纸张图 / 圆角 / 边框
         if let paper = context.coordinator.paperView {
             if paper.image !== paperImage {
                 paper.image = paperImage
             }
+            paper.layer.cornerRadius = max(paperCornerRadius, 0)
+            paper.layer.masksToBounds = true
+            paper.layer.borderWidth = 1.0 / max(fit, 0.0001)
+            paper.layer.borderColor = paperBorderColor.cgColor
         }
 
         let viewportChanged =
@@ -347,6 +359,7 @@ struct DrawingCanvas: UIViewRepresentable {
             scroll.contentSize = canvasSize
         }
 
+        // 只有「单页模式切换左右页」才调整偏移，绝不动缩放
         if abs(context.coordinator.lastInitialOffsetX - initialOffsetX) > 0.5 {
             context.coordinator.lastInitialOffsetX = initialOffsetX
 
@@ -461,6 +474,7 @@ struct DrawingCanvas: UIViewRepresentable {
         var initialOffsetX: CGFloat = 0
         var pencilOnly: Bool = false
 
+        /// 笔尖是否正落在纸上
         private(set) var isPencilDrawing: Bool = false
 
         var pagePanWanted: Bool = false
@@ -509,6 +523,7 @@ struct DrawingCanvas: UIViewRepresentable {
             resumeWorkItem?.cancel()
         }
 
+        /// 翻页手势开关：外层说可以用，并且「笔没落在纸上」
         func syncPageGestures() {
             let blocked = pencilOnly && isPencilDrawing
             pagePan?.isEnabled = pagePanWanted && !blocked
@@ -707,6 +722,7 @@ struct DrawingCanvas: UIViewRepresentable {
 
             guard pencilOnly else { return }
 
+            // 笔尖落纸：立刻停用单指翻页
             resumeWorkItem?.cancel()
             resumeWorkItem = nil
             isPencilDrawing = true
