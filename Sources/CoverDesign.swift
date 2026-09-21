@@ -280,13 +280,14 @@ struct NotebookCoverView: View {
                 .allowsHitTesting(false)
 
             if let name = book.customCoverImage {
+                // ⚠️ StoredImage 读的是 Images/ 目录，
+                //    所以存自定义封面时也必须用 saveImageData 存到同一个目录。
                 StoredImage(name: name, maxPixel: 900) { image in
                     image.resizable().scaledToFill()
                 }
                 .frame(width: width, height: height)
                 .clipped()
                 .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-                .opacity(0.96)
             }
 
             // 书脊
@@ -551,8 +552,6 @@ struct CoverPickerView: View {
                 Task { await loadForCrop(item) }
             }
             .fullScreenCover(isPresented: $showCropper) {
-                // ⚠️ 解包时换个名字（img），
-                //    否则闭包里那个 cropImage 是 let 常量，不能赋值。
                 if let img = cropImage {
                     CoverCropView(image: img,
                                   onDone: { ui in
@@ -695,7 +694,11 @@ struct CoverPickerView: View {
     private func saveCropped(_ ui: UIImage) {
         guard let data = ui.jpegData(compressionQuality: 0.92) else { return }
 
-        if let name = try? FileStorage.saveCoverData(data,
+        // ⚠️ 必须用 saveImageData（Images/ 目录），
+        //    因为封面视图是 StoredImage，它只从 Images/ 读图。
+        //    以前这里写的是 saveCoverData（Covers/ 目录），
+        //    存和读不是同一个地方，所以封面永远显不出来。
+        if let name = try? FileStorage.saveImageData(data,
                                                      preferredExtension: "jpg") {
             onCustomImage(name)
         }
