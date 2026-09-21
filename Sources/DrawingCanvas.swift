@@ -33,12 +33,13 @@ struct DrawingCanvas: UIViewRepresentable {
     // 手势开关
     let gesturesEnabled: Bool
     let twoFingerUndo: Bool
+    /// 已停用（双指长按连续撤回已删除），参数保留兼容
     let twoFingerLongPressUndo: Bool
     let threeFingerRedo: Bool
     let fourFingerClear: Bool
     let longPressEyedropper: Bool
 
-    // 翻页（编辑界面已停用）
+    // 翻页（编辑界面已停用，参数保留兼容）
     var pagePanEnabled: Bool = false
     var pageTapEnabled: Bool = false
     var onPagePanChanged: (CGFloat) -> Void = { _ in }
@@ -51,14 +52,13 @@ struct DrawingCanvas: UIViewRepresentable {
     let onPickColor: (Color) -> Void
     var onZoomChanged: (CGFloat) -> Void = { _ in }
 
+    /// 自定义手势只接受「手指」触摸，刻意排除 Apple Pencil
     static let fingerOnly: [NSNumber] = [
         NSNumber(value: UITouch.TouchType.direct.rawValue)
     ]
 
+    /// 手掌 / 小拇指侧面这类「大面积接触」的半径阈值（点）。只挡拖动/缩放。
     static let maxFingerRadius: CGFloat = 24
-
-    /// 双指按住超过这么久，就把撤回类手势全禁掉
-    static let twoFingerHoldThreshold: TimeInterval = 0.3
 
     private var fitScale: CGFloat {
         guard canvasSize.height > 0, viewportSize.height > 0 else { return 1 }
@@ -151,36 +151,7 @@ struct DrawingCanvas: UIViewRepresentable {
 
         applyInitialOffset(scroll, fit: fit, animated: false, in: context.coordinator)
 
-        // MARK: 双指「接触探针」
-        // ⚠️ 这是这次的关键：只要两根手指碰到屏幕（还没移动），
-        //    就立刻让画布的绘制手势让开 —— 不等捏合被识别，
-        //    否则切了笔之后，绘制手势会抢先把触摸吃掉，缩放就没了。
-        let probe = UILongPressGestureRecognizer(
-            target: context.coordinator,
-            action: #selector(Coordinator.handleTwoFingerProbe(_:))
-        )
-        probe.numberOfTouchesRequired = 2
-        probe.minimumPressDuration = 0
-        probe.allowableMovement = .greatestFiniteMagnitude
-        probe.cancelsTouchesInView = false
-        probe.delegate = context.coordinator
-        probe.allowedTouchTypes = Self.fingerOnly
-        scroll.addGestureRecognizer(probe)
-        context.coordinator.twoFingerProbe = probe
-
-        // MARK: 双指捏合 → 缩放
-        let pinch = UIPinchGestureRecognizer(
-            target: context.coordinator,
-            action: #selector(Coordinator.handlePinch(_:))
-        )
-        pinch.delegate = context.coordinator
-        pinch.cancelsTouchesInView = false
-        pinch.delaysTouchesBegan = false
-        pinch.allowedTouchTypes = Self.fingerOnly
-        scroll.addGestureRecognizer(pinch)
-        context.coordinator.customPinch = pinch
-
-        // MARK: 双指拖动 → 平移
+        // MARK: 双指拖动 → 平移（优先级最高的多指手势）
         let twoPan = UIPanGestureRecognizer(
             target: context.coordinator,
             action: #selector(Coordinator.handleTwoFingerPan(_:))
@@ -193,6 +164,18 @@ struct DrawingCanvas: UIViewRepresentable {
         twoPan.allowedTouchTypes = Self.fingerOnly
         scroll.addGestureRecognizer(twoPan)
         context.coordinator.twoFingerPan = twoPan
+
+        // MARK: 双指捏合 → 缩放
+        let pinch = UIPinchGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handlePinch(_:))
+        )
+        pinch.delegate = context.coordinator
+        pinch.cancelsTouchesInView = false
+        pinch.delaysTouchesBegan = false
+        pinch.allowedTouchTypes = Self.fingerOnly
+        scroll.addGestureRecognizer(pinch)
+        context.coordinator.customPinch = pinch
 
         // MARK: 单指拖动 → 翻页（编辑界面已停用）
         let pagePan = UIPanGestureRecognizer(
@@ -236,21 +219,6 @@ struct DrawingCanvas: UIViewRepresentable {
         scroll.addGestureRecognizer(twoTap)
         context.coordinator.twoFingerTap = twoTap
 
-        // MARK: 双指长按 → 连续撤销
-        let rapidUndo = UILongPressGestureRecognizer(
-            target: context.coordinator,
-            action: #selector(Coordinator.handleRapidUndo(_:))
-        )
-        rapidUndo.numberOfTouchesRequired = 2
-        rapidUndo.minimumPressDuration = 0.45
-        rapidUndo.allowableMovement = 60
-        rapidUndo.cancelsTouchesInView = false
-        rapidUndo.delegate = context.coordinator
-        rapidUndo.allowedTouchTypes = Self.fingerOnly
-        scroll.addGestureRecognizer(rapidUndo)
-        context.coordinator.rapidUndoGesture = rapidUndo
-        twoTap.require(toFail: rapidUndo)
-
         // MARK: 三指轻点 → 重做
         let threeTap = UITapGestureRecognizer(
             target: context.coordinator,
@@ -277,6 +245,14 @@ struct DrawingCanvas: UIViewRepresentable {
         scroll.addGestureRecognizer(fourTap)
         context.coordinator.fourFingerTap = fourTap
 
+        // ⚠️ 多指手势的优先级：
+        //    先让「双指长按并移动」（平移）识别，三个轻点手势都等它失败。
+        //    这样轻点误触不会把平移抢走；而平移一旦开始，
+        //    下面的 handleTwoFingerPan 会直接把轻点手势全禁掉。
+        twoTap.require(toFail: twoPan)
+        threeTap.require(toFail: twoPan)
+        fourTap.require(toFail: twoPan)
+
         // MARK: 单指长按 → 吸色
         let eyedropper = UILongPressGestureRecognizer(
             target: context.coordinator,
@@ -299,6 +275,7 @@ struct DrawingCanvas: UIViewRepresentable {
 
         let fit = fitScale
 
+        // 系统手势可能被系统重新激活 —— 每次都把它们按住
         scroll.isScrollEnabled = false
         scroll.panGestureRecognizer.isEnabled = false
         scroll.pinchGestureRecognizer?.isEnabled = false
@@ -319,15 +296,6 @@ struct DrawingCanvas: UIViewRepresentable {
         context.coordinator.onPageTap = onPageTap
         context.coordinator.pagePanWanted = pagePanEnabled
         context.coordinator.pageTapWanted = pageTapEnabled
-
-        // 记下设置，供双指结束后按原样恢复
-        context.coordinator.switches.gesturesEnabled = gesturesEnabled
-        context.coordinator.switches.twoFingerUndo = twoFingerUndo
-        context.coordinator.switches.twoFingerLongPressUndo = twoFingerLongPressUndo
-        context.coordinator.switches.threeFingerRedo = threeFingerRedo
-        context.coordinator.switches.fourFingerClear = fourFingerClear
-        context.coordinator.switches.longPressEyedropper = longPressEyedropper
-        context.coordinator.switches.pencilOnly = pencilOnly
 
         if let paper = context.coordinator.paperView {
             if paper.image !== paperImage {
@@ -418,18 +386,24 @@ struct DrawingCanvas: UIViewRepresentable {
             context.coordinator.zoom(by: 1 / 1.3)
         }
 
+        // 双指缩放 / 平移：始终开启
         context.coordinator.customPinch?.isEnabled = true
         context.coordinator.twoFingerPan?.isEnabled = true
-        context.coordinator.twoFingerProbe?.isEnabled = true
 
+        // 轻点类手势：受设置开关控制，同时受「平移进行中」压制
+        context.coordinator.applyTapStates(enabled: gesturesEnabled,
+                                           twoFingerUndo: twoFingerUndo,
+                                           threeFingerRedo: threeFingerRedo,
+                                           fourFingerClear: fourFingerClear)
+
+        context.coordinator.eyedropperGesture?.isEnabled =
+            gesturesEnabled && longPressEyedropper && pencilOnly
+
+        // 编辑界面不翻页
         context.coordinator.syncPageGestures()
-        context.coordinator.applyGestureSwitches()
 
-        // 兜底：既没在缩放/平移，也没有双指按着 → 绘制手势必须是开着的
-        if !context.coordinator.isTransforming,
-           !context.coordinator.twoFingerTouching {
-            context.coordinator.forceEnableDrawing()
-        }
+        // 兜底：确保绘制手势始终可用（画完一笔后缩放失效就是这个被卡住）
+        context.coordinator.forceEnableDrawing()
     }
 
     // MARK: - 偏移换算
@@ -462,18 +436,6 @@ struct DrawingCanvas: UIViewRepresentable {
                              UIScrollViewDelegate,
                              UIGestureRecognizerDelegate {
 
-        struct GestureSwitches {
-            var gesturesEnabled = true
-            var twoFingerUndo = true
-            var twoFingerLongPressUndo = true
-            var threeFingerRedo = true
-            var fourFingerClear = true
-            var longPressEyedropper = true
-            var pencilOnly = false
-        }
-
-        var switches = GestureSwitches()
-
         var onDrawingChanged: (PKDrawing) -> Void
         var onDrawingStateChanged: (Bool) -> Void
         var onPickColor: (Color) -> Void
@@ -494,11 +456,7 @@ struct DrawingCanvas: UIViewRepresentable {
         var initialOffsetX: CGFloat = 0
         var pencilOnly: Bool = false
 
-        /// 屏幕上是否有两根手指按着（还没抬）
-        private(set) var twoFingerTouching: Bool = false
-        /// 双指按住是否已经超过阈值
-        private(set) var twoFingerHeldLong: Bool = false
-        private(set) var isTransforming: Bool = false
+        private(set) var isPencilDrawing: Bool = false
 
         var pagePanWanted: Bool = false
         var pageTapWanted: Bool = false
@@ -513,21 +471,23 @@ struct DrawingCanvas: UIViewRepresentable {
         var lastAppliedOffsetX: CGFloat = -1
         var lastInitialOffsetX: CGFloat = -1
 
-        weak var twoFingerProbe: UILongPressGestureRecognizer?
         weak var customPinch: UIPinchGestureRecognizer?
         weak var twoFingerPan: UIPanGestureRecognizer?
         weak var pagePan: UIPanGestureRecognizer?
         weak var pageTap: UITapGestureRecognizer?
         weak var twoFingerTap: UITapGestureRecognizer?
-        weak var rapidUndoGesture: UILongPressGestureRecognizer?
         weak var threeFingerTap: UITapGestureRecognizer?
         weak var fourFingerTap: UITapGestureRecognizer?
         weak var eyedropperGesture: UILongPressGestureRecognizer?
 
-        private var rapidUndoTimer: Timer?
-        private var twoFingerHoldTimer: Timer?
-        private var pinchStartScale: CGFloat = 1
-        private var panStartOffset: CGPoint = .zero
+        private var resumeWorkItem: DispatchWorkItem?
+
+        /// 平移进行中：所有轻点手势暂时停用
+        private var suppressTaps = false
+        private var tapEnabled = false
+        private var allowTwoTap = false
+        private var allowThreeTap = false
+        private var allowFourTap = false
 
         private var lastReportedRatio: CGFloat = -1
 
@@ -542,79 +502,16 @@ struct DrawingCanvas: UIViewRepresentable {
         }
 
         deinit {
-            rapidUndoTimer?.invalidate()
-            twoFingerHoldTimer?.invalidate()
+            resumeWorkItem?.cancel()
         }
 
+        /// 编辑界面不翻页
         func syncPageGestures() {
             pagePan?.isEnabled = false
             pageTap?.isEnabled = false
         }
 
-        // MARK: 手势总开关
-        //
-        // 双指按着（超过阈值）或正在缩放/平移 → 除双指手势本身，全部停用。
-
-        func applyGestureSwitches() {
-            let on = switches.gesturesEnabled
-                && !isTransforming
-                && !twoFingerHeldLong
-
-            twoFingerTap?.isEnabled = on && switches.twoFingerUndo
-            rapidUndoGesture?.isEnabled = on && switches.twoFingerLongPressUndo
-            threeFingerTap?.isEnabled = on && switches.threeFingerRedo
-            fourFingerTap?.isEnabled = on && switches.fourFingerClear
-            eyedropperGesture?.isEnabled =
-                on && switches.longPressEyedropper && switches.pencilOnly
-        }
-
-        // MARK: 双指「接触探针」
-        //
-        // 两根手指一碰到屏幕：
-        //   1. 立刻让画布的绘制手势让开（不等捏合被识别），
-        //      否则切笔之后它会把触摸抢走，缩放就失效了；
-        //   2. 开始计时，按住超过 0.3 秒就把撤回 / 重做 / 清空全禁掉，
-        //      这样双指缩放时按多久都不会误撤图；
-        //      想撤回就快速轻点一下（0.3 秒内）。
-
-        @objc func handleTwoFingerProbe(_ g: UILongPressGestureRecognizer) {
-            switch g.state {
-            case .began:
-                twoFingerTouching = true
-
-                if let canvas {
-                    let s = canvas.drawingGestureRecognizer.state
-                    if s != .began && s != .changed {
-                        canvas.drawingGestureRecognizer.isEnabled = false
-                    }
-                }
-
-                twoFingerHoldTimer?.invalidate()
-                twoFingerHoldTimer = Timer.scheduledTimer(
-                    withTimeInterval: DrawingCanvas.twoFingerHoldThreshold,
-                    repeats: false
-                ) { [weak self] _ in
-                    guard let self else { return }
-                    self.twoFingerHeldLong = true
-                    self.applyGestureSwitches()
-                }
-
-                applyGestureSwitches()
-
-            case .ended, .cancelled, .failed:
-                twoFingerTouching = false
-                twoFingerHeldLong = false
-                twoFingerHoldTimer?.invalidate()
-                twoFingerHoldTimer = nil
-
-                canvas?.drawingGestureRecognizer.isEnabled = true
-                applyGestureSwitches()
-
-            default:
-                break
-            }
-        }
-
+        /// 兜底：绘制手势必须是开着的
         func forceEnableDrawing() {
             guard let canvas else { return }
             if !canvas.drawingGestureRecognizer.isEnabled {
@@ -622,16 +519,39 @@ struct DrawingCanvas: UIViewRepresentable {
             }
         }
 
+        // MARK: 轻点手势的开关
+
+        func applyTapStates(enabled: Bool,
+                            twoFingerUndo: Bool,
+                            threeFingerRedo: Bool,
+                            fourFingerClear: Bool) {
+            tapEnabled = enabled
+            allowTwoTap = twoFingerUndo
+            allowThreeTap = threeFingerRedo
+            allowFourTap = fourFingerClear
+            refreshTapGestures()
+        }
+
+        private func refreshTapGestures() {
+            let base = tapEnabled && !suppressTaps
+            twoFingerTap?.isEnabled = base && allowTwoTap
+            threeFingerTap?.isEnabled = base && allowThreeTap
+            fourFingerTap?.isEnabled = base && allowFourTap
+        }
+
         // MARK: 触摸过滤
 
         func gestureRecognizer(_ g: UIGestureRecognizer,
                                shouldReceive touch: UITouch) -> Bool {
+            // 画布自己的绘制手势：笔、手指一律放行
             if let canvas, g === canvas.drawingGestureRecognizer {
                 return true
             }
 
+            // 其余都是我们自己的手势：只认手指，不要笔
             if touch.type != .direct { return false }
 
+            // 只有拖动 / 缩放才检查接触面积（点击类不过滤，否则会失效）
             if g is UIPanGestureRecognizer || g is UIPinchGestureRecognizer {
                 if touch.majorRadius > DrawingCanvas.maxFingerRadius { return false }
             }
@@ -700,8 +620,6 @@ struct DrawingCanvas: UIViewRepresentable {
             switch g.state {
             case .began:
                 pinchStartScale = scroll.zoomScale
-                isTransforming = true
-                applyGestureSwitches()
 
             case .changed:
                 let minS = scroll.minimumZoomScale
@@ -712,9 +630,6 @@ struct DrawingCanvas: UIViewRepresentable {
                 scroll.setZoomScale(clamped, animated: false)
 
             case .ended, .cancelled, .failed:
-                isTransforming = false
-                canvas?.drawingGestureRecognizer.isEnabled = true
-                applyGestureSwitches()
                 if let s = self.scroll { reportZoom(s) }
 
             default:
@@ -722,7 +637,7 @@ struct DrawingCanvas: UIViewRepresentable {
             }
         }
 
-        // MARK: 双指拖动
+        // MARK: 双指拖动（长按并移动）——优先级最高
 
         @objc func handleTwoFingerPan(_ g: UIPanGestureRecognizer) {
             guard let scroll, let canvas else { return }
@@ -730,8 +645,11 @@ struct DrawingCanvas: UIViewRepresentable {
             switch g.state {
             case .began:
                 panStartOffset = scroll.contentOffset
-                isTransforming = true
-                applyGestureSwitches()
+
+                // ⚠️ 双指长按并移动期间，禁掉所有轻点手势，
+                //    避免平移被「双指轻点撤回」之类抢走
+                suppressTaps = true
+                refreshTapGestures()
 
             case .changed:
                 let t = g.translation(in: scroll)
@@ -748,16 +666,15 @@ struct DrawingCanvas: UIViewRepresentable {
                 scroll.contentOffset = CGPoint(x: x, y: y)
 
             case .ended, .cancelled, .failed:
-                isTransforming = false
-                canvas.drawingGestureRecognizer.isEnabled = true
-                applyGestureSwitches()
+                suppressTaps = false
+                refreshTapGestures()
 
             default:
                 break
             }
         }
 
-        // MARK: 手指翻页（编辑界面已停用）
+        // MARK: 手指翻页（编辑界面已停用，保留实现）
 
         @objc func handlePagePan(_ g: UIPanGestureRecognizer) {
             guard let scroll else { return }
@@ -809,11 +726,18 @@ struct DrawingCanvas: UIViewRepresentable {
 
         func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
             onDrawingStateChanged(true)
+            isPencilDrawing = true
         }
 
         func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
             onDrawingStateChanged(false)
-            forceEnableDrawing()
+
+            resumeWorkItem?.cancel()
+            let item = DispatchWorkItem { [weak self] in
+                self?.isPencilDrawing = false
+            }
+            resumeWorkItem = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: item)
         }
 
         // MARK: 手势动作
@@ -822,37 +746,6 @@ struct DrawingCanvas: UIViewRepresentable {
             guard let canvas else { return }
             canvas.undoManager?.undo()
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        }
-
-        @objc func handleRapidUndo(_ g: UILongPressGestureRecognizer) {
-            switch g.state {
-            case .began:
-                startRapidUndo()
-            case .ended, .cancelled, .failed:
-                stopRapidUndo()
-            default:
-                break
-            }
-        }
-
-        private func startRapidUndo() {
-            stopRapidUndo()
-            guard let canvas else { return }
-            canvas.undoManager?.undo()
-            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-
-            let timer = Timer.scheduledTimer(withTimeInterval: 0.18, repeats: true) {
-                [weak self] _ in
-                guard let self, let canvas = self.canvas else { return }
-                canvas.undoManager?.undo()
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            }
-            rapidUndoTimer = timer
-        }
-
-        private func stopRapidUndo() {
-            rapidUndoTimer?.invalidate()
-            rapidUndoTimer = nil
         }
 
         @objc func handleThreeFingerTap() {
