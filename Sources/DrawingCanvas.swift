@@ -145,6 +145,7 @@ struct DrawingCanvas: UIViewRepresentable {
         context.coordinator.canvas = canvas
         context.coordinator.container = container
         context.coordinator.pencilOnly = pencilOnly
+        context.coordinator.currentTool = tool
         context.coordinator.lastToolSignature = toolSignature
         context.coordinator.initialOffsetX = initialOffsetX
         context.coordinator.lastInitialOffsetX = initialOffsetX
@@ -245,9 +246,7 @@ struct DrawingCanvas: UIViewRepresentable {
         scroll.addGestureRecognizer(fourTap)
         context.coordinator.fourFingerTap = fourTap
 
-        // ⚠️ 多指优先级：先让「双指长按并移动」（平移）识别，
-        //    三个轻点手势都等它失败。平移一旦开始，
-        //    handleTwoFingerPan 会把轻点手势全禁掉。
+        // 多指优先级：先让「双指长按并移动」（平移）识别
         twoTap.require(toFail: twoPan)
         threeTap.require(toFail: twoPan)
         fourTap.require(toFail: twoPan)
@@ -290,6 +289,7 @@ struct DrawingCanvas: UIViewRepresentable {
         context.coordinator.spreadIndex = spreadIndex
         context.coordinator.displaySize = displaySize
         context.coordinator.pencilOnly = pencilOnly
+        context.coordinator.currentTool = tool
         context.coordinator.onPagePanChanged = onPagePanChanged
         context.coordinator.onPagePanEnded = onPagePanEnded
         context.coordinator.onPageTap = onPageTap
@@ -385,11 +385,9 @@ struct DrawingCanvas: UIViewRepresentable {
             context.coordinator.zoom(by: 1 / 1.3)
         }
 
-        // 双指缩放 / 平移：始终开启
         context.coordinator.customPinch?.isEnabled = true
         context.coordinator.twoFingerPan?.isEnabled = true
 
-        // 轻点类手势：受设置开关控制，同时受「平移进行中」压制
         context.coordinator.applyTapStates(enabled: gesturesEnabled,
                                            twoFingerUndo: twoFingerUndo,
                                            threeFingerRedo: threeFingerRedo,
@@ -398,10 +396,7 @@ struct DrawingCanvas: UIViewRepresentable {
         context.coordinator.eyedropperGesture?.isEnabled =
             gesturesEnabled && longPressEyedropper && pencilOnly
 
-        // 编辑界面不翻页
         context.coordinator.syncPageGestures()
-
-        // 兜底：确保绘制手势始终可用
         context.coordinator.forceEnableDrawing()
     }
 
@@ -455,6 +450,9 @@ struct DrawingCanvas: UIViewRepresentable {
         var initialOffsetX: CGFloat = 0
         var pencilOnly: Bool = false
 
+        /// 当前工具，湿墨收尾时要重设它
+        var currentTool: PKTool?
+
         private(set) var isPencilDrawing: Bool = false
 
         var pagePanWanted: Bool = false
@@ -479,13 +477,10 @@ struct DrawingCanvas: UIViewRepresentable {
         weak var fourFingerTap: UITapGestureRecognizer?
         weak var eyedropperGesture: UILongPressGestureRecognizer?
 
-        // ⚠️ 这两个是缩放 / 平移的起点状态，必须保留
         private var pinchStartScale: CGFloat = 1
         private var panStartOffset: CGPoint = .zero
-
         private var resumeWorkItem: DispatchWorkItem?
 
-        /// 平移进行中：所有轻点手势暂时停用
         private var suppressTaps = false
         private var tapEnabled = false
         private var allowTwoTap = false
@@ -508,13 +503,43 @@ struct DrawingCanvas: UIViewRepresentable {
             resumeWorkItem?.cancel()
         }
 
-        /// 编辑界面不翻页
+        // MARK: 湿墨收尾
+        //
+        // 荧光笔（.marker）和铅笔（.pencil）是「湿墨」，抬笔后 PencilKit 还要继续处理。
+        // 这期间画布自己的绘制手势有可能卡在「没结束」的中间状态，
+        // 一直霸占触摸 —— 外层滚动视图就再也收不到手指，缩放永久失效。
+        // 退出编辑模式重建画布才会好，就是这个原因。
+        //
+        // 这里做两件事：把绘制手势重启一次 + 重设绘制策略和工具，
+        // 逼 PencilKit 结束当前这趟湿墨会话。
+
+        func cleanupWetInk() {
+            guard let canvas else { return }
+
+            // 1. 重启画布自己的绘制手势
+            let dgr = canvas.drawingGestureRecognizer
+            if dgr.isEnabled {
+                dgr.isEnabled = false
+                dgr.isEnabled = true
+            }
+
+            // 2. 重设绘制策略（先切到相反值再切回来，保证真的生效）
+            let wanted: PKCanvasViewDrawingPolicy = pencilOnly ? .pencilOnly : .anyInput
+            let other: PKCanvasViewDrawingPolicy = (wanted == .pencilOnly) ? .anyInput : .pencilOnly
+            canvas.drawingPolicy = other
+            canvas.drawingPolicy = wanted
+
+            // 3. 工具重设一次
+            if let currentTool {
+                canvas.tool = currentTool
+            }
+        }
+
         func syncPageGestures() {
             pagePan?.isEnabled = false
             pageTap?.isEnabled = false
         }
 
-        /// 兜底：绘制手势必须是开着的
         func forceEnableDrawing() {
             guard let canvas else { return }
             if !canvas.drawingGestureRecognizer.isEnabled {
@@ -546,15 +571,12 @@ struct DrawingCanvas: UIViewRepresentable {
 
         func gestureRecognizer(_ g: UIGestureRecognizer,
                                shouldReceive touch: UITouch) -> Bool {
-            // 画布自己的绘制手势：笔、手指一律放行
             if let canvas, g === canvas.drawingGestureRecognizer {
                 return true
             }
 
-            // 其余都是我们自己的手势：只认手指，不要笔
             if touch.type != .direct { return false }
 
-            // 只有拖动 / 缩放才检查接触面积（点击类不过滤，否则会失效）
             if g is UIPanGestureRecognizer || g is UIPinchGestureRecognizer {
                 if touch.majorRadius > DrawingCanvas.maxFingerRadius { return false }
             }
@@ -622,6 +644,9 @@ struct DrawingCanvas: UIViewRepresentable {
 
             switch g.state {
             case .began:
+                // 湿墨兜底：捏合刚开始时先把画布收拾干净，
+                // 否则荧光笔 / 铅笔画过之后这里根本收不到触摸
+                cleanupWetInk()
                 pinchStartScale = scroll.zoomScale
 
             case .changed:
@@ -640,16 +665,16 @@ struct DrawingCanvas: UIViewRepresentable {
             }
         }
 
-        // MARK: 双指拖动（长按并移动）——优先级最高
+        // MARK: 双指拖动（长按并移动）
 
         @objc func handleTwoFingerPan(_ g: UIPanGestureRecognizer) {
             guard let scroll, let canvas else { return }
 
             switch g.state {
             case .began:
+                cleanupWetInk()
                 panStartOffset = scroll.contentOffset
 
-                // ⚠️ 双指长按并移动期间，禁掉所有轻点手势
                 suppressTaps = true
                 refreshTapGestures()
 
@@ -729,17 +754,22 @@ struct DrawingCanvas: UIViewRepresentable {
         func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
             onDrawingStateChanged(true)
             isPencilDrawing = true
+            resumeWorkItem?.cancel()
+            resumeWorkItem = nil
         }
 
         func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
             onDrawingStateChanged(false)
 
+            // 抬笔后主动给湿墨收尾
             resumeWorkItem?.cancel()
             let item = DispatchWorkItem { [weak self] in
-                self?.isPencilDrawing = false
+                guard let self else { return }
+                self.isPencilDrawing = false
+                self.cleanupWetInk()
             }
             resumeWorkItem = item
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: item)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: item)
         }
 
         // MARK: 手势动作
