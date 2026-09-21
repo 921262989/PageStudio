@@ -38,7 +38,7 @@ struct DrawingCanvas: UIViewRepresentable {
     let fourFingerClear: Bool
     let longPressEyedropper: Bool
 
-    // 翻页（编辑界面已停用，参数保留兼容）
+    // 翻页（编辑界面已停用）
     var pagePanEnabled: Bool = false
     var pageTapEnabled: Bool = false
     var onPagePanChanged: (CGFloat) -> Void = { _ in }
@@ -51,13 +51,14 @@ struct DrawingCanvas: UIViewRepresentable {
     let onPickColor: (Color) -> Void
     var onZoomChanged: (CGFloat) -> Void = { _ in }
 
-    /// 自定义手势只接受「手指」触摸，刻意排除 Apple Pencil
     static let fingerOnly: [NSNumber] = [
         NSNumber(value: UITouch.TouchType.direct.rawValue)
     ]
 
-    /// 手掌 / 小拇指侧面这类「大面积接触」的半径阈值（点）。
     static let maxFingerRadius: CGFloat = 24
+
+    /// 双指按住超过这么久，就把撤回类手势全禁掉
+    static let twoFingerHoldThreshold: TimeInterval = 0.3
 
     private var fitScale: CGFloat {
         guard canvasSize.height > 0, viewportSize.height > 0 else { return 1 }
@@ -149,6 +150,23 @@ struct DrawingCanvas: UIViewRepresentable {
         context.coordinator.lastInitialOffsetX = initialOffsetX
 
         applyInitialOffset(scroll, fit: fit, animated: false, in: context.coordinator)
+
+        // MARK: 双指「接触探针」
+        // ⚠️ 这是这次的关键：只要两根手指碰到屏幕（还没移动），
+        //    就立刻让画布的绘制手势让开 —— 不等捏合被识别，
+        //    否则切了笔之后，绘制手势会抢先把触摸吃掉，缩放就没了。
+        let probe = UILongPressGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handleTwoFingerProbe(_:))
+        )
+        probe.numberOfTouchesRequired = 2
+        probe.minimumPressDuration = 0
+        probe.allowableMovement = .greatestFiniteMagnitude
+        probe.cancelsTouchesInView = false
+        probe.delegate = context.coordinator
+        probe.allowedTouchTypes = Self.fingerOnly
+        scroll.addGestureRecognizer(probe)
+        context.coordinator.twoFingerProbe = probe
 
         // MARK: 双指捏合 → 缩放
         let pinch = UIPinchGestureRecognizer(
@@ -402,14 +420,14 @@ struct DrawingCanvas: UIViewRepresentable {
 
         context.coordinator.customPinch?.isEnabled = true
         context.coordinator.twoFingerPan?.isEnabled = true
+        context.coordinator.twoFingerProbe?.isEnabled = true
 
         context.coordinator.syncPageGestures()
-
-        // 按当前设置（双指进行中则全部停用）刷新其他手势
         context.coordinator.applyGestureSwitches()
 
-        // 兜底：没在缩放/平移，也没在落笔 → 绘制手势必须是开着的
-        if !context.coordinator.isTransforming {
+        // 兜底：既没在缩放/平移，也没有双指按着 → 绘制手势必须是开着的
+        if !context.coordinator.isTransforming,
+           !context.coordinator.twoFingerTouching {
             context.coordinator.forceEnableDrawing()
         }
     }
@@ -444,7 +462,6 @@ struct DrawingCanvas: UIViewRepresentable {
                              UIScrollViewDelegate,
                              UIGestureRecognizerDelegate {
 
-        /// 手势开关快照（由 updateUIView 同步进来）
         struct GestureSwitches {
             var gesturesEnabled = true
             var twoFingerUndo = true
@@ -477,6 +494,10 @@ struct DrawingCanvas: UIViewRepresentable {
         var initialOffsetX: CGFloat = 0
         var pencilOnly: Bool = false
 
+        /// 屏幕上是否有两根手指按着（还没抬）
+        private(set) var twoFingerTouching: Bool = false
+        /// 双指按住是否已经超过阈值
+        private(set) var twoFingerHeldLong: Bool = false
         private(set) var isTransforming: Bool = false
 
         var pagePanWanted: Bool = false
@@ -492,6 +513,7 @@ struct DrawingCanvas: UIViewRepresentable {
         var lastAppliedOffsetX: CGFloat = -1
         var lastInitialOffsetX: CGFloat = -1
 
+        weak var twoFingerProbe: UILongPressGestureRecognizer?
         weak var customPinch: UIPinchGestureRecognizer?
         weak var twoFingerPan: UIPanGestureRecognizer?
         weak var pagePan: UIPanGestureRecognizer?
@@ -503,6 +525,7 @@ struct DrawingCanvas: UIViewRepresentable {
         weak var eyedropperGesture: UILongPressGestureRecognizer?
 
         private var rapidUndoTimer: Timer?
+        private var twoFingerHoldTimer: Timer?
         private var pinchStartScale: CGFloat = 1
         private var panStartOffset: CGPoint = .zero
 
@@ -520,6 +543,7 @@ struct DrawingCanvas: UIViewRepresentable {
 
         deinit {
             rapidUndoTimer?.invalidate()
+            twoFingerHoldTimer?.invalidate()
         }
 
         func syncPageGestures() {
@@ -529,10 +553,12 @@ struct DrawingCanvas: UIViewRepresentable {
 
         // MARK: 手势总开关
         //
-        // 双指缩放 / 平移进行中 → 除它们自己以外，全部停用。
+        // 双指按着（超过阈值）或正在缩放/平移 → 除双指手势本身，全部停用。
 
         func applyGestureSwitches() {
-            let on = switches.gesturesEnabled && !isTransforming
+            let on = switches.gesturesEnabled
+                && !isTransforming
+                && !twoFingerHeldLong
 
             twoFingerTap?.isEnabled = on && switches.twoFingerUndo
             rapidUndoGesture?.isEnabled = on && switches.twoFingerLongPressUndo
@@ -542,36 +568,51 @@ struct DrawingCanvas: UIViewRepresentable {
                 on && switches.longPressEyedropper && switches.pencilOnly
         }
 
-        // MARK: 缩放 / 平移 ⇄ 绘制
+        // MARK: 双指「接触探针」
         //
-        // 画布的绘制手势会独吞触摸，双指开始时必须让它让开；
-        // 但如果此刻它正在画（.began / .changed），关掉会让
-        // PKCanvasView 卡住 —— 所以直接问它自己的状态，
-        // 不要用别处维护的标志（切笔时会不准）。
+        // 两根手指一碰到屏幕：
+        //   1. 立刻让画布的绘制手势让开（不等捏合被识别），
+        //      否则切笔之后它会把触摸抢走，缩放就失效了；
+        //   2. 开始计时，按住超过 0.3 秒就把撤回 / 重做 / 清空全禁掉，
+        //      这样双指缩放时按多久都不会误撤图；
+        //      想撤回就快速轻点一下（0.3 秒内）。
 
-        func beginTransform() {
-            guard !isTransforming else { return }
-            isTransforming = true
+        @objc func handleTwoFingerProbe(_ g: UILongPressGestureRecognizer) {
+            switch g.state {
+            case .began:
+                twoFingerTouching = true
 
-            if let canvas {
-                let s = canvas.drawingGestureRecognizer.state
-                if s != .began && s != .changed {
-                    canvas.drawingGestureRecognizer.isEnabled = false
+                if let canvas {
+                    let s = canvas.drawingGestureRecognizer.state
+                    if s != .began && s != .changed {
+                        canvas.drawingGestureRecognizer.isEnabled = false
+                    }
                 }
+
+                twoFingerHoldTimer?.invalidate()
+                twoFingerHoldTimer = Timer.scheduledTimer(
+                    withTimeInterval: DrawingCanvas.twoFingerHoldThreshold,
+                    repeats: false
+                ) { [weak self] _ in
+                    guard let self else { return }
+                    self.twoFingerHeldLong = true
+                    self.applyGestureSwitches()
+                }
+
+                applyGestureSwitches()
+
+            case .ended, .cancelled, .failed:
+                twoFingerTouching = false
+                twoFingerHeldLong = false
+                twoFingerHoldTimer?.invalidate()
+                twoFingerHoldTimer = nil
+
+                canvas?.drawingGestureRecognizer.isEnabled = true
+                applyGestureSwitches()
+
+            default:
+                break
             }
-
-            // 双指期间：其他手势一律停用
-            applyGestureSwitches()
-        }
-
-        func endTransform() {
-            guard isTransforming else { return }
-            isTransforming = false
-
-            canvas?.drawingGestureRecognizer.isEnabled = true
-
-            // 松手后按设置恢复
-            applyGestureSwitches()
         }
 
         func forceEnableDrawing() {
@@ -659,7 +700,8 @@ struct DrawingCanvas: UIViewRepresentable {
             switch g.state {
             case .began:
                 pinchStartScale = scroll.zoomScale
-                beginTransform()
+                isTransforming = true
+                applyGestureSwitches()
 
             case .changed:
                 let minS = scroll.minimumZoomScale
@@ -670,7 +712,9 @@ struct DrawingCanvas: UIViewRepresentable {
                 scroll.setZoomScale(clamped, animated: false)
 
             case .ended, .cancelled, .failed:
-                endTransform()
+                isTransforming = false
+                canvas?.drawingGestureRecognizer.isEnabled = true
+                applyGestureSwitches()
                 if let s = self.scroll { reportZoom(s) }
 
             default:
@@ -686,7 +730,8 @@ struct DrawingCanvas: UIViewRepresentable {
             switch g.state {
             case .began:
                 panStartOffset = scroll.contentOffset
-                beginTransform()
+                isTransforming = true
+                applyGestureSwitches()
 
             case .changed:
                 let t = g.translation(in: scroll)
@@ -703,7 +748,9 @@ struct DrawingCanvas: UIViewRepresentable {
                 scroll.contentOffset = CGPoint(x: x, y: y)
 
             case .ended, .cancelled, .failed:
-                endTransform()
+                isTransforming = false
+                canvas.drawingGestureRecognizer.isEnabled = true
+                applyGestureSwitches()
 
             default:
                 break
