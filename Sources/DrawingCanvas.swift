@@ -38,7 +38,7 @@ struct DrawingCanvas: UIViewRepresentable {
     let fourFingerClear: Bool
     let longPressEyedropper: Bool
 
-    // 翻页（手指滑动 / 点边缘）
+    // 翻页（手指滑动 / 点边缘）—— 编辑界面里已停用，参数保留兼容
     var pagePanEnabled: Bool = false
     var pageTapEnabled: Bool = false
     var onPagePanChanged: (CGFloat) -> Void = { _ in }
@@ -51,12 +51,13 @@ struct DrawingCanvas: UIViewRepresentable {
     let onPickColor: (Color) -> Void
     var onZoomChanged: (CGFloat) -> Void = { _ in }
 
-    /// ⚠️ 所有手势（包括系统自带的）都只接受「手指」触摸，Apple Pencil 一律排除。
+    /// ⚠️ 自定义手势只接受「手指」触摸，刻意排除 Apple Pencil
     static let fingerOnly: [NSNumber] = [
         NSNumber(value: UITouch.TouchType.direct.rawValue)
     ]
 
     /// 手掌 / 小拇指侧面这类「大面积接触」的半径阈值（点）。
+    /// 只用来挡「拖动 / 缩放」，不挡点击类手势。
     static let maxFingerRadius: CGFloat = 24
 
     private var fitScale: CGFloat {
@@ -82,10 +83,7 @@ struct DrawingCanvas: UIViewRepresentable {
         scroll.isOpaque = false
         scroll.contentInsetAdjustmentBehavior = .never
 
-        // ⚠️⚠️ 这两行是「单指 / 笔尖把画布拖走」的根治：
-        //   · isScrollEnabled = false → UIScrollView 自己的滚动彻底关掉
-        //   · 光设 panGestureRecognizer.isEnabled 不够，
-        //     系统会在布局变化时把它重新激活，所以还要关 isScrollEnabled
+        // 外层滚动彻底关掉：单指 / 笔都不会把画布拖走
         scroll.isScrollEnabled = false
         scroll.bounces = false
         scroll.bouncesZoom = false
@@ -93,7 +91,6 @@ struct DrawingCanvas: UIViewRepresentable {
         scroll.showsVerticalScrollIndicator = false
         scroll.delegate = context.coordinator
 
-        // 系统手势就算被系统重新启用，也让它们碰不到 Apple Pencil
         scroll.panGestureRecognizer.isEnabled = false
         scroll.panGestureRecognizer.allowedTouchTypes = Self.fingerOnly
         scroll.pinchGestureRecognizer?.isEnabled = false
@@ -127,7 +124,6 @@ struct DrawingCanvas: UIViewRepresentable {
         canvas.tool = tool
         canvas.drawingPolicy = pencilOnly ? .pencilOnly : .anyInput
 
-        // 画布自己是 UIScrollView 子类，它自带的滚动 / 缩放也全关掉
         canvas.isScrollEnabled = false
         canvas.minimumZoomScale = 1
         canvas.maximumZoomScale = 1
@@ -182,7 +178,7 @@ struct DrawingCanvas: UIViewRepresentable {
         scroll.addGestureRecognizer(twoPan)
         context.coordinator.twoFingerPan = twoPan
 
-        // MARK: 单指拖动 → 翻页
+        // MARK: 单指拖动 → 翻页（编辑界面已停用，见 syncPageGestures）
         let pagePan = UIPanGestureRecognizer(
             target: context.coordinator,
             action: #selector(Coordinator.handlePagePan(_:))
@@ -193,10 +189,11 @@ struct DrawingCanvas: UIViewRepresentable {
         pagePan.cancelsTouchesInView = false
         pagePan.delaysTouchesBegan = false
         pagePan.allowedTouchTypes = Self.fingerOnly
+        pagePan.isEnabled = false
         scroll.addGestureRecognizer(pagePan)
         context.coordinator.pagePan = pagePan
 
-        // MARK: 单指点击 → 边缘翻页
+        // MARK: 单指点击 → 边缘翻页（编辑界面已停用）
         let pageTap = UITapGestureRecognizer(
             target: context.coordinator,
             action: #selector(Coordinator.handlePageTap(_:))
@@ -206,6 +203,7 @@ struct DrawingCanvas: UIViewRepresentable {
         pageTap.cancelsTouchesInView = false
         pageTap.delegate = context.coordinator
         pageTap.allowedTouchTypes = Self.fingerOnly
+        pageTap.isEnabled = false
         scroll.addGestureRecognizer(pageTap)
         context.coordinator.pageTap = pageTap
 
@@ -221,7 +219,6 @@ struct DrawingCanvas: UIViewRepresentable {
         twoTap.allowedTouchTypes = Self.fingerOnly
         scroll.addGestureRecognizer(twoTap)
         context.coordinator.twoFingerTap = twoTap
-        pageTap.require(toFail: twoTap)
 
         // MARK: 双指长按 → 连续撤销
         let rapidUndo = UILongPressGestureRecognizer(
@@ -397,6 +394,7 @@ struct DrawingCanvas: UIViewRepresentable {
             context.coordinator.zoom(by: 1 / 1.3)
         }
 
+        // 手势开关（设置里那 5 个子开关 + 总开关）
         let on = gesturesEnabled
         context.coordinator.twoFingerTap?.isEnabled = on && twoFingerUndo
         context.coordinator.rapidUndoGesture?.isEnabled = on && twoFingerLongPressUndo
@@ -405,9 +403,11 @@ struct DrawingCanvas: UIViewRepresentable {
         context.coordinator.eyedropperGesture?.isEnabled =
             on && longPressEyedropper && pencilOnly
 
+        // 双指缩放 / 平移：始终开启
         context.coordinator.customPinch?.isEnabled = true
         context.coordinator.twoFingerPan?.isEnabled = true
 
+        // 编辑界面不翻页
         context.coordinator.syncPageGestures()
     }
 
@@ -509,17 +509,21 @@ struct DrawingCanvas: UIViewRepresentable {
             resumeWorkItem?.cancel()
         }
 
+        /// ⚠️ 编辑界面不翻页（用户要求）：单指翻页 / 边缘点击翻页一律停用。
         func syncPageGestures() {
-            let blocked = pencilOnly && isPencilDrawing
-            pagePan?.isEnabled = pagePanWanted && !blocked
-            pageTap?.isEnabled = pageTapWanted && !blocked
+            pagePan?.isEnabled = false
+            pageTap?.isEnabled = false
         }
 
         // MARK: 触摸过滤
+        //
+        // 「大面积接触」只用来挡「拖动 / 缩放」——
+        // 双指轻点撤回、三指重做、四指清空是**点击**类手势，
+        // 一旦也按面积过滤，手指稍微压一点就会被拒掉，手势就不认了。
 
         func gestureRecognizer(_ g: UIGestureRecognizer,
                                shouldReceive touch: UITouch) -> Bool {
-            // 画布自己的绘制手势：笔、手指一律放行，否则画不了字
+            // 画布自己的绘制手势：笔、手指一律放行
             if let canvas, g === canvas.drawingGestureRecognizer {
                 return true
             }
@@ -527,8 +531,10 @@ struct DrawingCanvas: UIViewRepresentable {
             // 其余都是我们自己的手势：只认手指，不要笔
             if touch.type != .direct { return false }
 
-            // 大面积接触 = 手掌 / 小拇指侧面 → 直接忽略
-            if touch.majorRadius > DrawingCanvas.maxFingerRadius { return false }
+            // 只有拖动 / 缩放才检查接触面积
+            if g is UIPanGestureRecognizer || g is UIPinchGestureRecognizer {
+                if touch.majorRadius > DrawingCanvas.maxFingerRadius { return false }
+            }
 
             return true
         }
@@ -652,7 +658,7 @@ struct DrawingCanvas: UIViewRepresentable {
             canvas.drawingGestureRecognizer.isEnabled = !suspend
         }
 
-        // MARK: 手指翻页
+        // MARK: 手指翻页（编辑界面已停用，保留实现）
 
         @objc func handlePagePan(_ g: UIPanGestureRecognizer) {
             guard let scroll else { return }
@@ -704,27 +710,14 @@ struct DrawingCanvas: UIViewRepresentable {
 
         func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
             onDrawingStateChanged(true)
-
-            guard pencilOnly else { return }
-
-            resumeWorkItem?.cancel()
-            resumeWorkItem = nil
             isPencilDrawing = true
-            syncPageGestures()
         }
 
         func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
             onDrawingStateChanged(false)
-
-            guard pencilOnly else { return }
-
-            // 抬笔后延迟 0.35 秒再恢复翻页手势，
-            // 避免写字两笔之间、手掌还搭在屏上时被误触
             resumeWorkItem?.cancel()
             let item = DispatchWorkItem { [weak self] in
-                guard let self else { return }
-                self.isPencilDrawing = false
-                self.syncPageGestures()
+                self?.isPencilDrawing = false
             }
             resumeWorkItem = item
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: item)
