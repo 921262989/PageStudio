@@ -2078,7 +2078,7 @@ struct ZoomablePageView: UIViewRepresentable {
             let imgSize = image.size
             guard imgSize.width > 1, imgSize.height > 1 else { return }
 
-            // 贴合：整页刚好放得下（不留边，但也不能超出）
+            // 贴合：整页刚好放得下
             let fit = min(viewportSize.width / imgSize.width,
                           viewportSize.height / imgSize.height)
 
@@ -2148,7 +2148,8 @@ enum DocumentPickerService {
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: types,
                                                     asCopy: true)
         picker.allowsMultipleSelection = allowsMultiple
-        picker.showingFileExtensions = true
+        // ⚠️ 属性名是 shouldShowFileExtensions（上一版我写成了 showingFileExtensions）
+        picker.shouldShowFileExtensions = true
         picker.delegate = Delegate.shared
 
         top.present(picker, animated: true)
