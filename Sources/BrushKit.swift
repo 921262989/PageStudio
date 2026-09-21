@@ -38,8 +38,10 @@ enum PenKind: String, CaseIterable, Identifiable, Codable {
     /// 荧光笔需要透明叠加，其余不透明（透明度由 BrushSettings.opacity 控制）
     var baseAlpha: CGFloat { self == .marker ? 1.0 : 1.0 }
 
-    /// 荧光笔的勾线宽度需要放大，否则太细
-    var widthMultiplier: CGFloat { self == .marker ? 1.6 : 1.0 }
+    /// 勾线宽度的倍率。
+    /// 荧光笔原来是 1.6（怕太细看不见），实测偏粗，
+    /// 现在改成 1.0 —— 想更细就去画笔面板里把「粗细」往左拉。
+    var widthMultiplier: CGFloat { 1.0 }
 }
 
 // MARK: - 单支笔的设置
@@ -271,7 +273,6 @@ extension Color {
 // MARK: - 工具签名（必须稳定）
 
 /// ⚠️ 不能用 Color 的 description —— 它不稳定。
-/// 画布工具被反复重设，正是笔迹「画上去一个样、几秒后另一个样」的元凶之一。
 func stableColorKey(_ color: Color) -> String {
     color.hexString
 }
