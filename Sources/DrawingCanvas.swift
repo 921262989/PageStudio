@@ -302,6 +302,15 @@ struct DrawingCanvas: UIViewRepresentable {
         context.coordinator.pagePanWanted = pagePanEnabled
         context.coordinator.pageTapWanted = pageTapEnabled
 
+        // 记下设置，供双指结束后按原样恢复
+        context.coordinator.switches.gesturesEnabled = gesturesEnabled
+        context.coordinator.switches.twoFingerUndo = twoFingerUndo
+        context.coordinator.switches.twoFingerLongPressUndo = twoFingerLongPressUndo
+        context.coordinator.switches.threeFingerRedo = threeFingerRedo
+        context.coordinator.switches.fourFingerClear = fourFingerClear
+        context.coordinator.switches.longPressEyedropper = longPressEyedropper
+        context.coordinator.switches.pencilOnly = pencilOnly
+
         if let paper = context.coordinator.paperView {
             if paper.image !== paperImage {
                 paper.image = paperImage
@@ -391,22 +400,16 @@ struct DrawingCanvas: UIViewRepresentable {
             context.coordinator.zoom(by: 1 / 1.3)
         }
 
-        let on = gesturesEnabled
-        context.coordinator.twoFingerTap?.isEnabled = on && twoFingerUndo
-        context.coordinator.rapidUndoGesture?.isEnabled = on && twoFingerLongPressUndo
-        context.coordinator.threeFingerTap?.isEnabled = on && threeFingerRedo
-        context.coordinator.fourFingerTap?.isEnabled = on && fourFingerClear
-        context.coordinator.eyedropperGesture?.isEnabled =
-            on && longPressEyedropper && pencilOnly
-
         context.coordinator.customPinch?.isEnabled = true
         context.coordinator.twoFingerPan?.isEnabled = true
 
         context.coordinator.syncPageGestures()
 
-        // 兜底：没在缩放 / 平移，也没在落笔 → 绘制手势必须是开着的
-        if !context.coordinator.isTransforming,
-           !context.coordinator.isPencilDrawing {
+        // 按当前设置（双指进行中则全部停用）刷新其他手势
+        context.coordinator.applyGestureSwitches()
+
+        // 兜底：没在缩放/平移，也没在落笔 → 绘制手势必须是开着的
+        if !context.coordinator.isTransforming {
             context.coordinator.forceEnableDrawing()
         }
     }
@@ -441,6 +444,19 @@ struct DrawingCanvas: UIViewRepresentable {
                              UIScrollViewDelegate,
                              UIGestureRecognizerDelegate {
 
+        /// 手势开关快照（由 updateUIView 同步进来）
+        struct GestureSwitches {
+            var gesturesEnabled = true
+            var twoFingerUndo = true
+            var twoFingerLongPressUndo = true
+            var threeFingerRedo = true
+            var fourFingerClear = true
+            var longPressEyedropper = true
+            var pencilOnly = false
+        }
+
+        var switches = GestureSwitches()
+
         var onDrawingChanged: (PKDrawing) -> Void
         var onDrawingStateChanged: (Bool) -> Void
         var onPickColor: (Color) -> Void
@@ -461,8 +477,6 @@ struct DrawingCanvas: UIViewRepresentable {
         var initialOffsetX: CGFloat = 0
         var pencilOnly: Bool = false
 
-        /// 笔尖是否正落在屏幕上（正在画）
-        private(set) var isPencilDrawing: Bool = false
         private(set) var isTransforming: Bool = false
 
         var pagePanWanted: Bool = false
@@ -513,28 +527,51 @@ struct DrawingCanvas: UIViewRepresentable {
             pageTap?.isEnabled = false
         }
 
+        // MARK: 手势总开关
+        //
+        // 双指缩放 / 平移进行中 → 除它们自己以外，全部停用。
+
+        func applyGestureSwitches() {
+            let on = switches.gesturesEnabled && !isTransforming
+
+            twoFingerTap?.isEnabled = on && switches.twoFingerUndo
+            rapidUndoGesture?.isEnabled = on && switches.twoFingerLongPressUndo
+            threeFingerTap?.isEnabled = on && switches.threeFingerRedo
+            fourFingerTap?.isEnabled = on && switches.fourFingerClear
+            eyedropperGesture?.isEnabled =
+                on && switches.longPressEyedropper && switches.pencilOnly
+        }
+
         // MARK: 缩放 / 平移 ⇄ 绘制
         //
-        // 画布的绘制手势会抢走双指触摸，必须在双指开始那一刻让它让开；
-        // 但如果这时笔尖还压在屏幕上（正在画），
-        // 直接关掉会让 PKCanvasView 卡住 —— 铅笔 / 荧光笔尤其明显。
-        //
-        // 所以规则是：**只在笔不在屏幕上时**才去关绘制手势。
-        // 写字都是「抬笔 → 双指缩放」，这条就足够用了。
+        // 画布的绘制手势会独吞触摸，双指开始时必须让它让开；
+        // 但如果此刻它正在画（.began / .changed），关掉会让
+        // PKCanvasView 卡住 —— 所以直接问它自己的状态，
+        // 不要用别处维护的标志（切笔时会不准）。
 
         func beginTransform() {
             guard !isTransforming else { return }
             isTransforming = true
 
-            if !isPencilDrawing {
-                canvas?.drawingGestureRecognizer.isEnabled = false
+            if let canvas {
+                let s = canvas.drawingGestureRecognizer.state
+                if s != .began && s != .changed {
+                    canvas.drawingGestureRecognizer.isEnabled = false
+                }
             }
+
+            // 双指期间：其他手势一律停用
+            applyGestureSwitches()
         }
 
         func endTransform() {
             guard isTransforming else { return }
             isTransforming = false
+
             canvas?.drawingGestureRecognizer.isEnabled = true
+
+            // 松手后按设置恢复
+            applyGestureSwitches()
         }
 
         func forceEnableDrawing() {
@@ -673,7 +710,7 @@ struct DrawingCanvas: UIViewRepresentable {
             }
         }
 
-        // MARK: 手指翻页（编辑界面已停用，保留实现）
+        // MARK: 手指翻页（编辑界面已停用）
 
         @objc func handlePagePan(_ g: UIPanGestureRecognizer) {
             guard let scroll else { return }
@@ -725,16 +762,10 @@ struct DrawingCanvas: UIViewRepresentable {
 
         func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
             onDrawingStateChanged(true)
-            // 立即标记：落笔期间不去关绘制手势
-            isPencilDrawing = true
         }
 
         func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
             onDrawingStateChanged(false)
-            // 立即标记（不再延迟）：抬笔后双指缩放就能正常工作了
-            isPencilDrawing = false
-
-            // 顺手确保绘制手势是开着的
             forceEnableDrawing()
         }
 
