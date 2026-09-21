@@ -57,7 +57,6 @@ struct DrawingCanvas: UIViewRepresentable {
     ]
 
     /// 手掌 / 小拇指侧面这类「大面积接触」的半径阈值（点）。
-    /// 只用来挡「拖动 / 缩放」，不挡点击类手势。
     static let maxFingerRadius: CGFloat = 24
 
     private var fitScale: CGFloat {
@@ -405,8 +404,9 @@ struct DrawingCanvas: UIViewRepresentable {
 
         context.coordinator.syncPageGestures()
 
-        // 兜底：没有正在进行的缩放 / 平移时，绘制手势必须是开着的
-        if !context.coordinator.isTransforming {
+        // 兜底：没在缩放 / 平移，也没在落笔 → 绘制手势必须是开着的
+        if !context.coordinator.isTransforming,
+           !context.coordinator.isPencilDrawing {
             context.coordinator.forceEnableDrawing()
         }
     }
@@ -461,6 +461,7 @@ struct DrawingCanvas: UIViewRepresentable {
         var initialOffsetX: CGFloat = 0
         var pencilOnly: Bool = false
 
+        /// 笔尖是否正落在屏幕上（正在画）
         private(set) var isPencilDrawing: Bool = false
         private(set) var isTransforming: Bool = false
 
@@ -490,7 +491,6 @@ struct DrawingCanvas: UIViewRepresentable {
         private var rapidUndoTimer: Timer?
         private var pinchStartScale: CGFloat = 1
         private var panStartOffset: CGPoint = .zero
-        private var resumeWorkItem: DispatchWorkItem?
 
         private var lastReportedRatio: CGFloat = -1
 
@@ -506,30 +506,27 @@ struct DrawingCanvas: UIViewRepresentable {
 
         deinit {
             rapidUndoTimer?.invalidate()
-            resumeWorkItem?.cancel()
         }
 
-        /// 编辑界面不翻页
         func syncPageGestures() {
             pagePan?.isEnabled = false
             pageTap?.isEnabled = false
         }
 
-        // MARK: 缩放 / 平移
+        // MARK: 缩放 / 平移 ⇄ 绘制
         //
-        // ⚠️「仅 Pencil」模式下**完全不去碰**绘制手势。
-        //    因为铅笔 / 荧光笔的 ink 需要持续跟踪触摸，
-        //    把绘制手势关了再开会把 PKCanvasView 的内部状态搞乱，
-        //    结果就是「下笔之后双指缩放、平移全失效」。
+        // 画布的绘制手势会抢走双指触摸，必须在双指开始那一刻让它让开；
+        // 但如果这时笔尖还压在屏幕上（正在画），
+        // 直接关掉会让 PKCanvasView 卡住 —— 铅笔 / 荧光笔尤其明显。
         //
-        //    手指本来就不画画，用不着关它。只有「手指+Pencil」模式
-        //    才需要临时收起来，避免双指按下去在纸上划出一道线。
+        // 所以规则是：**只在笔不在屏幕上时**才去关绘制手势。
+        // 写字都是「抬笔 → 双指缩放」，这条就足够用了。
 
         func beginTransform() {
             guard !isTransforming else { return }
             isTransforming = true
 
-            if !pencilOnly {
+            if !isPencilDrawing {
                 canvas?.drawingGestureRecognizer.isEnabled = false
             }
         }
@@ -728,18 +725,17 @@ struct DrawingCanvas: UIViewRepresentable {
 
         func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
             onDrawingStateChanged(true)
+            // 立即标记：落笔期间不去关绘制手势
             isPencilDrawing = true
         }
 
         func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
             onDrawingStateChanged(false)
+            // 立即标记（不再延迟）：抬笔后双指缩放就能正常工作了
+            isPencilDrawing = false
 
-            resumeWorkItem?.cancel()
-            let item = DispatchWorkItem { [weak self] in
-                self?.isPencilDrawing = false
-            }
-            resumeWorkItem = item
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: item)
+            // 顺手确保绘制手势是开着的
+            forceEnableDrawing()
         }
 
         // MARK: 手势动作
