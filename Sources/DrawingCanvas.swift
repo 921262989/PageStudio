@@ -282,7 +282,6 @@ struct DrawingCanvas: UIViewRepresentable {
 
         let fit = fitScale
 
-        // 系统手势可能被系统重新激活 —— 每次都把它们按住
         scroll.isScrollEnabled = false
         scroll.panGestureRecognizer.isEnabled = false
         scroll.pinchGestureRecognizer?.isEnabled = false
@@ -393,7 +392,6 @@ struct DrawingCanvas: UIViewRepresentable {
             context.coordinator.zoom(by: 1 / 1.3)
         }
 
-        // 手势开关
         let on = gesturesEnabled
         context.coordinator.twoFingerTap?.isEnabled = on && twoFingerUndo
         context.coordinator.rapidUndoGesture?.isEnabled = on && twoFingerLongPressUndo
@@ -402,16 +400,12 @@ struct DrawingCanvas: UIViewRepresentable {
         context.coordinator.eyedropperGesture?.isEnabled =
             on && longPressEyedropper && pencilOnly
 
-        // 双指缩放 / 平移：始终开启
         context.coordinator.customPinch?.isEnabled = true
         context.coordinator.twoFingerPan?.isEnabled = true
 
-        // 编辑界面不翻页
         context.coordinator.syncPageGestures()
 
-        // ⚠️ 兜底：只要没有正在进行的缩放 / 平移，
-        //    绘制手势必须是开着的。
-        //    （之前画完一笔后缩放失效，就是这里被卡住了）
+        // 兜底：没有正在进行的缩放 / 平移时，绘制手势必须是开着的
         if !context.coordinator.isTransforming {
             context.coordinator.forceEnableDrawing()
         }
@@ -468,8 +462,6 @@ struct DrawingCanvas: UIViewRepresentable {
         var pencilOnly: Bool = false
 
         private(set) var isPencilDrawing: Bool = false
-
-        /// 双指缩放 / 平移是否正在进行
         private(set) var isTransforming: Bool = false
 
         var pagePanWanted: Bool = false
@@ -517,21 +509,29 @@ struct DrawingCanvas: UIViewRepresentable {
             resumeWorkItem?.cancel()
         }
 
-        /// 编辑界面不翻页：单指翻页 / 边缘点击翻页一律停用
+        /// 编辑界面不翻页
         func syncPageGestures() {
             pagePan?.isEnabled = false
             pageTap?.isEnabled = false
         }
 
-        // MARK: 缩放 / 平移期间临时收起绘制手势
+        // MARK: 缩放 / 平移
         //
-        // ⚠️ 必须成对调用；万一有哪次没配上，
-        //    updateUIView 里的兜底会把它打开。
+        // ⚠️「仅 Pencil」模式下**完全不去碰**绘制手势。
+        //    因为铅笔 / 荧光笔的 ink 需要持续跟踪触摸，
+        //    把绘制手势关了再开会把 PKCanvasView 的内部状态搞乱，
+        //    结果就是「下笔之后双指缩放、平移全失效」。
+        //
+        //    手指本来就不画画，用不着关它。只有「手指+Pencil」模式
+        //    才需要临时收起来，避免双指按下去在纸上划出一道线。
 
         func beginTransform() {
             guard !isTransforming else { return }
             isTransforming = true
-            canvas?.drawingGestureRecognizer.isEnabled = false
+
+            if !pencilOnly {
+                canvas?.drawingGestureRecognizer.isEnabled = false
+            }
         }
 
         func endTransform() {
@@ -540,7 +540,6 @@ struct DrawingCanvas: UIViewRepresentable {
             canvas?.drawingGestureRecognizer.isEnabled = true
         }
 
-        /// 兜底：确保绘制手势是开着的
         func forceEnableDrawing() {
             guard let canvas else { return }
             if !canvas.drawingGestureRecognizer.isEnabled {
@@ -552,15 +551,12 @@ struct DrawingCanvas: UIViewRepresentable {
 
         func gestureRecognizer(_ g: UIGestureRecognizer,
                                shouldReceive touch: UITouch) -> Bool {
-            // 画布自己的绘制手势：笔、手指一律放行
             if let canvas, g === canvas.drawingGestureRecognizer {
                 return true
             }
 
-            // 其余都是我们自己的手势：只认手指，不要笔
             if touch.type != .direct { return false }
 
-            // 只有拖动 / 缩放才检查接触面积（点击类不过滤，否则会失效）
             if g is UIPanGestureRecognizer || g is UIPinchGestureRecognizer {
                 if touch.majorRadius > DrawingCanvas.maxFingerRadius { return false }
             }
