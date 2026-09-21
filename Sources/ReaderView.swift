@@ -39,18 +39,11 @@ struct BookReaderView: View {
 
     @State private var fastJumpActive = false
 
-    /// 翻页动画：
-    ///   "flip"  = 3D 纸板翻转
-    ///   "slide" = 层叠平行平移
-    @AppStorage("pageTurnStyle") private var pageTurnStyleRaw: String = "flip"
-
-    /// 全屏贴合模式
-    @State private var immersiveMode = false
-    @State private var immersiveZoom: CGFloat = 1
-
     @State private var isPenActive = false
     @State private var activeTool: ActiveTool = .brush(.pen)
     @State private var penColor: Color = Color(white: 0.06)
+
+    // 默认就是矢量橡皮
     @State private var eraserKind: EraserKind = .vector
     @State private var eraserWidth: EraserWidth = .medium
 
@@ -94,7 +87,6 @@ struct BookReaderView: View {
     @State private var pdfImportDone = 0
 
     private static let paperCache = NSCache<NSString, UIImage>()
-    private static let immersiveCache = NSCache<NSString, UIImage>()
 
     private var book: Book? { library.book(id: bookID) }
     private var settings: AppSettings { settingsStore.settings }
@@ -108,12 +100,7 @@ struct BookReaderView: View {
                 ReaderBackground(theme: theme)
 
                 if let book {
-                    if immersiveMode {
-                        immersiveView(book: book, container: geo.size)
-                            .transition(.opacity)
-                    } else {
-                        main(book: book, container: geo.size)
-                    }
+                    main(book: book, container: geo.size)
                 } else {
                     Text("这本画册已被删除")
                         .foregroundStyle(.secondary)
@@ -127,9 +114,7 @@ struct BookReaderView: View {
         }
         .navigationTitle(book?.title ?? "画册")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar { immersiveMode ? nil : toolbarContent }
-        .navigationBarHidden(immersiveMode)
-        .statusBarHidden(immersiveMode)
+        .toolbar { toolbarContent }
         .photosPicker(isPresented: $showPhotoPicker,
                       selection: $photoItems,
                       maxSelectionCount: 200,
@@ -257,10 +242,6 @@ struct BookReaderView: View {
     }
 
     // MARK: - 主布局
-    //
-    // 画笔工具栏是「悬浮层」：它写在 ZStack 的第二个子视图里，
-    // 和书页区域是叠在一起的（书页在下、工具栏在上），**完全不占布局位置**。
-    // 所以画布区域永远是整个屏幕，放大时画布能一直延伸到工具栏下面。
 
     @ViewBuilder
     private func main(book: Book, container: CGSize) -> some View {
@@ -292,141 +273,6 @@ struct BookReaderView: View {
         }
         .animation(.spring(response: 0.28, dampingFraction: 0.86),
                    value: activePopover)
-    }
-
-    // MARK: - 全屏贴合模式
-
-    @ViewBuilder
-    private func immersiveView(book: Book, container: CGSize) -> some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
-
-            let index = currentUnit(book: book)
-
-            if let image = immersiveImage(book: book, index: index) {
-                ZoomablePageView(image: image,
-                                 viewportSize: container,
-                                 onZoomChanged: { ratio in
-                                     immersiveZoom = ratio
-                                 })
-                    .ignoresSafeArea()
-            } else {
-                ProgressView().tint(.white)
-            }
-
-            // 翻页手势（手指）
-            Color.clear
-                .contentShape(Rectangle())
-                .gesture(turnGesture(size: readerSize(in: container, book: book),
-                                     book: book))
-                .allowsHitTesting(true)
-
-            // 退出按钮
-            VStack {
-                HStack {
-                    Spacer()
-                    Button {
-                        withAnimation(.easeOut(duration: 0.2)) {
-                            immersiveMode = false
-                        }
-                        immersiveZoom = 1
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "arrow.down.right.and.arrow.up.left")
-                            Text("退出全屏")
-                        }
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 9)
-                        .background(Color.black.opacity(0.55), in: Capsule())
-                        .overlay(Capsule().stroke(Color.white.opacity(0.15),
-                                                  lineWidth: 0.5))
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.trailing, 16)
-                    .padding(.top, 12)
-                }
-                Spacer()
-            }
-
-            // 页码
-            VStack {
-                Spacer()
-                Text(positionText(book: book))
-                    .font(.system(size: 12, weight: .medium).monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.85))
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(Color.black.opacity(0.45), in: Capsule())
-                    .padding(.bottom, 18)
-            }
-            .allowsHitTesting(false)
-        }
-    }
-
-    /// 把当前跨页渲染成一张位图（含纸张、内页样式、图片、笔迹），供全屏模式缩放
-    private func immersiveImage(book: Book, index: Int) -> UIImage? {
-        let key = "immersive-\(book.id.uuidString)-\(index)-\(layerStore.version)"
-            as NSString
-
-        if let cached = Self.immersiveCache.object(forKey: key) {
-            return cached
-        }
-
-        let spreads = SpreadLayout.spreads(for: book)
-        guard spreads.indices.contains(index) else { return nil }
-        let spread = spreads[index]
-
-        let logical = DrawingGeometry.spreadSize(ratio: book.pageAspectRatio)
-        let renderSize = CGSize(width: logical.width * 0.5,
-                                height: logical.height * 0.5)
-        let scale: CGFloat = 2
-
-        let format = UIGraphicsImageRendererFormat.default()
-        format.scale = scale
-        format.opaque = true
-
-        let renderer = UIGraphicsImageRenderer(size: renderSize, format: format)
-
-        let image = renderer.image { ctx in
-            let content = SpreadCanvasView(book: book,
-                                           spread: spread,
-                                           pageWidth: renderSize.width / 2,
-                                           pageHeight: renderSize.height,
-                                           drawingRevision: layerStore.version,
-                                           showDrawing: false,
-                                           theme: theme)
-                .frame(width: renderSize.width, height: renderSize.height)
-
-            let ir = ImageRenderer(content: content)
-            ir.scale = scale
-            ir.isOpaque = true
-
-            if let base = ir.uiImage {
-                base.draw(in: CGRect(origin: .zero, size: renderSize))
-            }
-
-            // 笔迹
-            let layers = layerStore.layers(bookId: book.id, spreadIndex: spread.index)
-            for meta in layers where meta.isVisible {
-                let drawing = layerStore.drawing(bookId: book.id,
-                                                 spreadIndex: spread.index,
-                                                 layerID: meta.id)
-                guard !drawing.strokes.isEmpty else { continue }
-
-                let ink = drawing.image(from: CGRect(origin: .zero, size: logical),
-                                        scale: scale)
-
-                ctx.cgContext.saveGState()
-                ctx.cgContext.setAlpha(CGFloat(min(max(meta.opacity, 0), 1)))
-                ink.draw(in: CGRect(origin: .zero, size: renderSize))
-                ctx.cgContext.restoreGState()
-            }
-        }
-
-        Self.immersiveCache.setObject(image, forKey: key)
-        return image
     }
 
     @ViewBuilder
@@ -539,8 +385,6 @@ struct BookReaderView: View {
 
     // MARK: - 静止场景
 
-    /// 编辑中：不套外框、不叠底图 —— 让 DrawingCanvas 里的纸张
-    /// （含边缘）自己跟缩放一起放大；画布区域仍是整屏。
     @ViewBuilder
     private func stableScene(book: Book, size: ReaderSize, index: Int) -> some View {
         let sIndex = spreadIndexForUnit(index, book: book)
@@ -549,58 +393,41 @@ struct BookReaderView: View {
         let editingThisUnit = isPenActive && index == currentUnit(book: book)
         let spreadSize = CGSize(width: size.pageWidth * 2, height: size.pageHeight)
 
-        if editingThisUnit {
-            ZStack {
-                ForEach(layers) { meta in
-                    if meta.id == activeID {
-                        if meta.isVisible {
-                            drawingCanvas(book: book, unitIndex: index, size: size,
-                                          spreadIndex: sIndex, layerID: meta.id)
-                                .opacity(meta.clampedOpacity)
-                        }
-                    } else if meta.isVisible {
-                        InkImageView(drawing: layerStore.drawing(bookId: book.id,
-                                                                 spreadIndex: sIndex,
-                                                                 layerID: meta.id),
-                                     size: spreadSize,
-                                     revision: layerStore.version,
-                                     opacity: meta.opacity)
-                            .allowsHitTesting(false)
-                    }
-                }
-            }
-            .frame(width: size.containerWidth, height: size.containerHeight)
-        } else {
-            ZStack {
-                SpreadCanvasView(book: book,
-                                 spread: spreadForUnit(index, book: book) ?? emptySpread,
-                                 pageWidth: size.pageWidth,
-                                 pageHeight: size.pageHeight,
-                                 drawingRevision: 0,
-                                 showDrawing: false,
-                                 theme: theme)
-                    .allowsHitTesting(false)
+        ZStack {
+            SpreadCanvasView(book: book,
+                             spread: spreadForUnit(index, book: book) ?? emptySpread,
+                             pageWidth: size.pageWidth,
+                             pageHeight: size.pageHeight,
+                             drawingRevision: 0,
+                             showDrawing: false,
+                             theme: theme)
+                .allowsHitTesting(false)
 
-                ForEach(layers) { meta in
+            ForEach(layers) { meta in
+                if editingThisUnit && meta.id == activeID {
                     if meta.isVisible {
-                        InkImageView(drawing: layerStore.drawing(bookId: book.id,
-                                                                 spreadIndex: sIndex,
-                                                                 layerID: meta.id),
-                                     size: spreadSize,
-                                     revision: layerStore.version,
-                                     opacity: meta.opacity)
-                            .allowsHitTesting(false)
+                        drawingCanvas(book: book, unitIndex: index, size: size,
+                                      spreadIndex: sIndex, layerID: meta.id)
+                            .opacity(meta.clampedOpacity)
                     }
+                } else if meta.isVisible {
+                    InkImageView(drawing: layerStore.drawing(bookId: book.id,
+                                                             spreadIndex: sIndex,
+                                                             layerID: meta.id),
+                                 size: spreadSize,
+                                 revision: layerStore.version,
+                                 opacity: meta.opacity)
+                        .allowsHitTesting(false)
                 }
             }
-            .frame(width: size.containerWidth, height: size.containerHeight)
-            .clipShape(RoundedRectangle(cornerRadius: bookCornerRadius,
-                                        style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: bookCornerRadius, style: .continuous)
-                    .stroke(PaperStyle.border, lineWidth: 0.5)
-            )
         }
+        .frame(width: size.containerWidth, height: size.containerHeight)
+        .clipShape(RoundedRectangle(cornerRadius: bookCornerRadius,
+                                    style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: bookCornerRadius, style: .continuous)
+                .stroke(PaperStyle.border, lineWidth: 0.5)
+        )
     }
 
     private var emptySpread: Spread {
@@ -620,41 +447,29 @@ struct BookReaderView: View {
 
     // MARK: - 翻页场景
     //
-    // 双页模式：两种动画可选
-    //   · "flip"  = 3D 纸板翻转
-    //   · "slide" = 层叠平行平移
-    // 单页模式：只做层叠平行平移，不做 3D 翻转；页面独立，不与双页混用。
-    //
-    // ⚠️ 平移方向「跟着手指走」：
-    //     方向由 direction 决定（从左往右装订 = -1，从右往左装订 = +1），
-    //     手指往哪边滑，页面就往哪边走，绝不反着来。
-
-    private var pageTurnStyleIsSlide: Bool {
-        pageTurnStyleRaw == "slide"
-    }
+    // 要点：
+    //  · 静止的整跨页：四角圆角（左页左两角 + 右页右两角，中线是直角）
+    //  · 翻动的那张纸：只在「外侧」有圆角 ——
+    //      正面是右页 → 只圆右边两角
+    //      背面是左页 → 只圆左边两角
+    //    中线那一侧永远是直角，跟真书一样。
+    //  · 不给纸张整体加裁剪，这样它转动时能探出书框。
 
     @ViewBuilder
     private func spreadOrSingleFlipping(book: Book, size: ReaderSize,
                                         from: Int, progress: CGFloat) -> some View {
         if viewMode == .spread {
-            if pageTurnStyleIsSlide {
-                spreadSlideScene(book: book, size: size,
-                                 from: from, progress: progress)
-            } else {
-                spreadFlipScene(book: book, size: size,
+            spreadFlippingScene(book: book, size: size,
                                 from: from, progress: progress)
-            }
         } else {
-            singleSlideScene(book: book, size: size,
-                             from: from, progress: progress)
+            singleFlippingScene(book: book, size: size,
+                                from: from, progress: progress)
         }
     }
 
-    // MARK: 双页 · 3D 纸板翻转
-
     @ViewBuilder
-    private func spreadFlipScene(book: Book, size: ReaderSize,
-                                 from: Int, progress: CGFloat) -> some View {
+    private func spreadFlippingScene(book: Book, size: ReaderSize,
+                                     from: Int, progress: CGFloat) -> some View {
         let spreads = SpreadLayout.spreads(for: book)
         let to = from + 1
         let pw = size.pageWidth
@@ -669,6 +484,7 @@ struct BookReaderView: View {
                                                    binding: book.bindingDirection)
 
             ZStack {
+                // ① 静止层：目标跨页，裁在书框里（四角圆角）
                 ZStack {
                     SpreadCanvasView(book: book,
                                      spread: toSpread,
@@ -697,6 +513,8 @@ struct BookReaderView: View {
                         .stroke(PaperStyle.border, lineWidth: 0.5)
                 )
 
+                // ② 翻动的那张纸：不整体裁剪 → 能探出书框；
+                //    圆角只加在外侧边缘，中线保持直角。
                 FlipCard(front: pageOrPaper(book: book,
                                             index: fromSides.right,
                                             size: size)
@@ -722,120 +540,56 @@ struct BookReaderView: View {
         }
     }
 
-    // MARK: 双页 · 层叠平行平移（跟手）
-
     @ViewBuilder
-    private func spreadSlideScene(book: Book, size: ReaderSize,
-                                  from: Int, progress: CGFloat) -> some View {
-        let spreads = SpreadLayout.spreads(for: book)
-        let to = from + 1
-        let pw = size.pageWidth
-        let ph = size.pageHeight
-
-        // 手指方向：从左往右装订是 -1，从右往左装订是 +1
-        let direction: Double = (book.bindingDirection == .leftToRight) ? -1 : 1
-
-        if spreads.indices.contains(from), spreads.indices.contains(to) {
-            ZStack {
-                // ① 下层：目标跨页（固定不动）
-                spreadPaperLayer(book: book,
-                                 spreadIndex: to,
-                                 spread: spreads[to],
-                                 pw: pw,
-                                 ph: ph)
-
-                // ② 上层：当前跨页，跟着手指滑走（最多 80% 页宽）
-                spreadPaperLayer(book: book,
-                                 spreadIndex: from,
-                                 spread: spreads[from],
-                                 pw: pw,
-                                 ph: ph)
-                    .offset(x: CGFloat(progress * direction) * pw * 0.8)
-            }
-            .frame(width: pw * 2, height: ph)
-            .clipped()
-        }
-    }
-
-    @ViewBuilder
-    private func spreadPaperLayer(book: Book,
-                                  spreadIndex: Int,
-                                  spread: Spread,
-                                  pw: CGFloat,
-                                  ph: CGFloat) -> some View {
-        ZStack {
-            SpreadCanvasView(book: book,
-                             spread: spread,
-                             pageWidth: pw,
-                             pageHeight: ph,
-                             drawingRevision: layerStore.version,
-                             showDrawing: false,
-                             theme: theme)
-                .frame(width: pw * 2, height: ph)
-                .allowsHitTesting(false)
-
-            bakedLayers(book: book,
-                        spreadIndex: spreadIndex,
-                        size: CGSize(width: pw * 2, height: ph))
-        }
-        .frame(width: pw * 2, height: ph)
-        .clipShape(RoundedRectangle(cornerRadius: bookCornerRadius,
-                                    style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: bookCornerRadius, style: .continuous)
-                .stroke(PaperStyle.border, lineWidth: 0.5)
-        )
-    }
-
-    // MARK: 单页 · 层叠平行平移（跟手，不做 3D 翻转）
-
-    @ViewBuilder
-    private func singleSlideScene(book: Book, size: ReaderSize,
-                                  from: Int, progress: CGFloat) -> some View {
+    private func singleFlippingScene(book: Book, size: ReaderSize,
+                                     from: Int, progress: CGFloat) -> some View {
         let pw = size.pageWidth
         let ph = size.pageHeight
         let to = from + 1
-
-        // 手指方向
-        let direction: Double = (book.bindingDirection == .leftToRight) ? -1 : 1
 
         if book.pages.indices.contains(from), book.pages.indices.contains(to) {
             ZStack {
-                // 下层：下一页
-                singlePaperLayer(book: book, pageIndex: to, size: size)
+                ZStack {
+                    SinglePageView(book: book,
+                                   pageIndex: to,
+                                   pageWidth: pw,
+                                   pageHeight: ph,
+                                   drawingRevision: layerStore.version,
+                                   showDrawing: false,
+                                   theme: theme)
+                        .allowsHitTesting(false)
+                        .overlay {
+                            pageInkOverlay(book: book,
+                                           pageIndex: to,
+                                           size: size)
+                        }
+                }
+                .frame(width: pw, height: ph)
+                .clipShape(RoundedRectangle(cornerRadius: bookCornerRadius,
+                                            style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: bookCornerRadius,
+                                     style: .continuous)
+                        .stroke(PaperStyle.border, lineWidth: 0.5)
+                )
 
-                // 上层：当前页，跟着手指滑走
-                singlePaperLayer(book: book, pageIndex: from, size: size)
-                    .offset(x: CGFloat(progress * direction) * pw * 0.8)
+                // 单页模式：一页独自呈现，两侧都是外侧 → 四角圆角
+                FlipCard(front: pageOrPaper(book: book, index: from, size: size)
+                            .clipShape(RoundedRectangle(cornerRadius: bookCornerRadius,
+                                                        style: .continuous)),
+                         back: pageOrPaper(book: book, index: to, size: size)
+                            .clipShape(RoundedRectangle(cornerRadius: bookCornerRadius,
+                                                        style: .continuous)),
+                         angle: -Double(progress) * 180,
+                         anchor: .leading,
+                         perspective: 0.32,
+                         dimming: PaperStyle.flipDimming,
+                         paperColor: PaperStyle.fill,
+                         borderColor: PaperStyle.border)
+                    .frame(width: pw, height: ph)
             }
             .frame(width: pw, height: ph)
-            .clipped()
         }
-    }
-
-    @ViewBuilder
-    private func singlePaperLayer(book: Book,
-                                  pageIndex: Int,
-                                  size: ReaderSize) -> some View {
-        ZStack {
-            SinglePageView(book: book,
-                           pageIndex: pageIndex,
-                           pageWidth: size.pageWidth,
-                           pageHeight: size.pageHeight,
-                           drawingRevision: layerStore.version,
-                           showDrawing: false,
-                           theme: theme)
-                .allowsHitTesting(false)
-
-            pageInkOverlay(book: book, pageIndex: pageIndex, size: size)
-        }
-        .frame(width: size.pageWidth, height: size.pageHeight)
-        .clipShape(RoundedRectangle(cornerRadius: bookCornerRadius,
-                                    style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: bookCornerRadius, style: .continuous)
-                .stroke(PaperStyle.border, lineWidth: 0.5)
-        )
     }
 
     @ViewBuilder
@@ -1043,8 +797,7 @@ struct BookReaderView: View {
     private func paperImage(book: Book, spreadIndex: Int,
                             logical: CGSize) -> UIImage? {
         let key = "paper-\(book.id.uuidString)-\(spreadIndex)"
-            + "-\(Int(logical.width))x\(Int(logical.height))-\(layerStore.version)"
-            as NSString
+            + "-\(Int(logical.width))x\(Int(logical.height))" as NSString
 
         if let cached = Self.paperCache.object(forKey: key) {
             return cached
@@ -1085,9 +838,6 @@ struct BookReaderView: View {
         let showRightHalf = isSingle && isRightPage(unitIndex: index, book: book)
         let initialOffsetX: CGFloat = showRightHalf ? (logical.width / 2) : 0
 
-        let fit = max(displayViewport.height / logical.height, 0.0001)
-        let paperCorner = bookCornerRadius / fit
-
         DrawingCanvas(
             canvasSize: logical,
             viewportSize: displayViewport,
@@ -1097,8 +847,6 @@ struct BookReaderView: View {
             paperImage: paperImage(book: book,
                                    spreadIndex: spreadIndex,
                                    logical: logical),
-            paperCornerRadius: paperCorner,
-            paperBorderColor: UIColor(PaperStyle.border),
             book: book,
             spreadIndex: spreadIndex,
             initialDrawing: layerStore.drawing(bookId: book.id,
@@ -1458,7 +1206,7 @@ struct BookReaderView: View {
                     .foregroundStyle(.white.opacity(0.75))
                     .padding(.horizontal, 8)
                     .padding(.vertical, 3)
-                    .background(Color.black.opacity(0.30), in: Capsule())
+                    .background(Color.black.opacity(0.38), in: Capsule())
             }
             .buttonStyle(.plain)
             .foregroundStyle(.white)
@@ -1523,7 +1271,7 @@ struct BookReaderView: View {
         }
     }
 
-    // MARK: - 画笔工具栏（悬浮半透明，压在书页上面）
+    // MARK: - 画笔工具栏
 
     @ViewBuilder
     private var penToolbar: some View {
@@ -1551,9 +1299,8 @@ struct BookReaderView: View {
             .foregroundStyle(.white)
             .padding(.vertical, 9)
             .padding(.horizontal, 18)
-            .background(.ultraThinMaterial,
-                        in: Capsule())
-            .overlay(Capsule().stroke(Color.white.opacity(0.14), lineWidth: 0.5))
+            .background(Color.black.opacity(0.72), in: Capsule())
+            .overlay(Capsule().stroke(Color.white.opacity(0.12), lineWidth: 0.5))
         }
         .buttonStyle(.plain)
     }
@@ -1700,7 +1447,6 @@ struct BookReaderView: View {
             .overlay(Color.white.opacity(0.25))
     }
 
-    /// 工具栏的一行：**半透明毛玻璃**，能透出下面的书页
     @ViewBuilder
     private func toolbarRow<Content: View>(
         @ViewBuilder content: () -> Content
@@ -1713,9 +1459,8 @@ struct BookReaderView: View {
             .padding(.horizontal, 14)
         }
         .frame(maxWidth: 820)
-        .background(.ultraThinMaterial, in: Capsule())
-        .overlay(Capsule().stroke(Color.white.opacity(0.12), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.25), radius: 12, y: 4)
+        .background(Color.black.opacity(0.72), in: Capsule())
+        .overlay(Capsule().stroke(Color.white.opacity(0.10), lineWidth: 0.5))
     }
 
     @ViewBuilder
@@ -1784,16 +1529,6 @@ struct BookReaderView: View {
                     .font(.title3)
             }
 
-            Button {
-                immersiveZoom = 1
-                withAnimation(.easeOut(duration: 0.2)) {
-                    immersiveMode = true
-                }
-            } label: {
-                Image(systemName: "arrow.up.left.and.arrow.down.right")
-                    .font(.title3)
-            }
-
             Menu {
                 Button {
                     toggleViewMode()
@@ -1801,16 +1536,6 @@ struct BookReaderView: View {
                     Label(viewMode == .spread ? "切换为单页" : "切换为双页",
                           systemImage: viewMode == .spread
                                         ? "rectangle.portrait" : "book")
-                }
-
-                Button {
-                    pageTurnStyleRaw = pageTurnStyleIsSlide ? "flip" : "slide"
-                } label: {
-                    Label(pageTurnStyleIsSlide ? "翻页动画：层叠平移"
-                                               : "翻页动画：3D 翻转",
-                          systemImage: pageTurnStyleIsSlide
-                                        ? "rectangle.2.swap"
-                                        : "rectangle.portrait.rotate")
                 }
 
                 Button {
@@ -1988,7 +1713,6 @@ struct BookReaderView: View {
 
         if let old { FileStorage.deleteImage(named: old) }
         Self.paperCache.removeAllObjects()
-        Self.immersiveCache.removeAllObjects()
     }
 
     private func importFromPhotos(_ items: [PhotosPickerItem]) async {
@@ -2073,7 +1797,6 @@ struct BookReaderView: View {
         didAutoAppend = false
         isDraggingPage = false
         Self.paperCache.removeAllObjects()
-        Self.immersiveCache.removeAllObjects()
 
         if viewMode == .spread {
             position = Double(SpreadLayout.spreadIndex(containingPage: startIndex,
@@ -2084,8 +1807,10 @@ struct BookReaderView: View {
     }
 }
 
-// MARK: - 单侧圆角
+// MARK: - 单侧圆角（真书那种：左页只圆左边，右页只圆右边）
 
+/// 只给指定的角做圆角，其余边角保持直角。
+/// 双页模式里，翻动的那张纸用这个 —— 外侧圆、靠中线那侧直角。
 struct PageCornerShape: Shape {
     var radius: CGFloat
     var corners: UIRectCorner
@@ -2096,124 +1821,6 @@ struct PageCornerShape: Shape {
                                   byRoundingCorners: corners,
                                   cornerRadii: CGSize(width: r, height: r))
         return Path(bezier.cgPath)
-    }
-}
-
-// MARK: - 全屏模式用的可缩放页面
-//
-// 「贴合」：按较大的那个比例放大，让页面**先顶到屏幕的某一对边**
-// （上下先到就贴上下、左右先到就贴左右），宁可裁掉一点，也不留白；
-// 然后**居中显示**，不再缩在左上角。
-
-struct ZoomablePageView: UIViewRepresentable {
-    let image: UIImage
-    let viewportSize: CGSize
-    var onZoomChanged: (CGFloat) -> Void = { _ in }
-
-    func makeCoordinator() -> Coordinator { Coordinator(self) }
-
-    func makeUIView(context: Context) -> UIScrollView {
-        let scroll = UIScrollView()
-        scroll.backgroundColor = .black
-        scroll.isOpaque = true
-        scroll.showsHorizontalScrollIndicator = false
-        scroll.showsVerticalScrollIndicator = false
-        scroll.bouncesZoom = true
-        scroll.contentInsetAdjustmentBehavior = .never
-        scroll.delegate = context.coordinator
-
-        let iv = UIImageView(image: image)
-        iv.contentMode = .scaleAspectFit
-        iv.isUserInteractionEnabled = false
-        scroll.addSubview(iv)
-
-        context.coordinator.scroll = scroll
-        context.coordinator.imageView = iv
-        context.coordinator.applyLayout(viewportSize: viewportSize)
-        return scroll
-    }
-
-    func updateUIView(_ scroll: UIScrollView, context: Context) {
-        context.coordinator.parent = self
-
-        if let iv = context.coordinator.imageView, iv.image !== image {
-            iv.image = image
-            context.coordinator.applyLayout(viewportSize: viewportSize)
-            return
-        }
-
-        let changed = abs(scroll.bounds.width - viewportSize.width) > 0.5 ||
-                      abs(scroll.bounds.height - viewportSize.height) > 0.5
-        if changed {
-            context.coordinator.applyLayout(viewportSize: viewportSize)
-        }
-    }
-
-    final class Coordinator: NSObject, UIScrollViewDelegate {
-        var parent: ZoomablePageView
-        weak var scroll: UIScrollView?
-        weak var imageView: UIImageView?
-
-        private var lastReported: CGFloat = -1
-
-        init(_ parent: ZoomablePageView) { self.parent = parent }
-
-        func applyLayout(viewportSize: CGSize) {
-            guard let scroll, let iv = imageView, let image = iv.image else { return }
-            guard viewportSize.width > 1, viewportSize.height > 1 else { return }
-
-            let imgSize = image.size
-            guard imgSize.width > 1, imgSize.height > 1 else { return }
-
-            // 用「较大的比例」：哪一对边先碰到屏幕边缘，就贴住那一对边
-            let fill = max(viewportSize.width / imgSize.width,
-                           viewportSize.height / imgSize.height)
-
-            scroll.frame = CGRect(origin: .zero, size: viewportSize)
-            scroll.bounds = CGRect(origin: .zero, size: viewportSize)
-            scroll.minimumZoomScale = fill
-            scroll.maximumZoomScale = fill * 6
-
-            iv.frame = CGRect(origin: .zero, size: imgSize)
-            scroll.contentSize = imgSize
-            scroll.setZoomScale(fill, animated: false)
-
-            centerContent(scroll, imgSize: imgSize)
-            report(scroll)
-        }
-
-        /// 手动按 zoomScale 算居中偏移（不依赖 contentSize 何时刷新）
-        private func centerContent(_ scroll: UIScrollView, imgSize: CGSize) {
-            let scale = scroll.zoomScale
-            let contentW = imgSize.width * scale
-            let contentH = imgSize.height * scale
-
-            let x = max((contentW - scroll.bounds.width) / 2, 0)
-            let y = max((contentH - scroll.bounds.height) / 2, 0)
-            scroll.contentOffset = CGPoint(x: x, y: y)
-        }
-
-        func viewForZooming(in scrollView: UIScrollView) -> UIView? {
-            imageView
-        }
-
-        func scrollViewDidZoom(_ scrollView: UIScrollView) {
-            report(scrollView)
-        }
-
-        private func report(_ scrollView: UIScrollView) {
-            let fit = scrollView.minimumZoomScale
-            guard fit > 0, fit.isFinite else { return }
-            var ratio = scrollView.zoomScale / fit
-            guard ratio.isFinite else { return }
-            ratio = min(max(ratio, 0.5), 12)
-            guard abs(ratio - lastReported) > 0.004 else { return }
-            lastReported = ratio
-
-            DispatchQueue.main.async { [weak self] in
-                self?.parent.onZoomChanged(ratio)
-            }
-        }
     }
 }
 
