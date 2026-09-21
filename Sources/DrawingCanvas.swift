@@ -245,10 +245,9 @@ struct DrawingCanvas: UIViewRepresentable {
         scroll.addGestureRecognizer(fourTap)
         context.coordinator.fourFingerTap = fourTap
 
-        // ⚠️ 多指手势的优先级：
-        //    先让「双指长按并移动」（平移）识别，三个轻点手势都等它失败。
-        //    这样轻点误触不会把平移抢走；而平移一旦开始，
-        //    下面的 handleTwoFingerPan 会直接把轻点手势全禁掉。
+        // ⚠️ 多指优先级：先让「双指长按并移动」（平移）识别，
+        //    三个轻点手势都等它失败。平移一旦开始，
+        //    handleTwoFingerPan 会把轻点手势全禁掉。
         twoTap.require(toFail: twoPan)
         threeTap.require(toFail: twoPan)
         fourTap.require(toFail: twoPan)
@@ -402,7 +401,7 @@ struct DrawingCanvas: UIViewRepresentable {
         // 编辑界面不翻页
         context.coordinator.syncPageGestures()
 
-        // 兜底：确保绘制手势始终可用（画完一笔后缩放失效就是这个被卡住）
+        // 兜底：确保绘制手势始终可用
         context.coordinator.forceEnableDrawing()
     }
 
@@ -479,6 +478,10 @@ struct DrawingCanvas: UIViewRepresentable {
         weak var threeFingerTap: UITapGestureRecognizer?
         weak var fourFingerTap: UITapGestureRecognizer?
         weak var eyedropperGesture: UILongPressGestureRecognizer?
+
+        // ⚠️ 这两个是缩放 / 平移的起点状态，必须保留
+        private var pinchStartScale: CGFloat = 1
+        private var panStartOffset: CGPoint = .zero
 
         private var resumeWorkItem: DispatchWorkItem?
 
@@ -646,8 +649,7 @@ struct DrawingCanvas: UIViewRepresentable {
             case .began:
                 panStartOffset = scroll.contentOffset
 
-                // ⚠️ 双指长按并移动期间，禁掉所有轻点手势，
-                //    避免平移被「双指轻点撤回」之类抢走
+                // ⚠️ 双指长按并移动期间，禁掉所有轻点手势
                 suppressTaps = true
                 refreshTapGestures()
 
