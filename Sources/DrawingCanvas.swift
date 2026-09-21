@@ -38,7 +38,7 @@ struct DrawingCanvas: UIViewRepresentable {
     let fourFingerClear: Bool
     let longPressEyedropper: Bool
 
-    // 翻页（手指滑动 / 点边缘）—— 编辑界面里已停用，参数保留兼容
+    // 翻页（编辑界面已停用，参数保留兼容）
     var pagePanEnabled: Bool = false
     var pageTapEnabled: Bool = false
     var onPagePanChanged: (CGFloat) -> Void = { _ in }
@@ -51,7 +51,7 @@ struct DrawingCanvas: UIViewRepresentable {
     let onPickColor: (Color) -> Void
     var onZoomChanged: (CGFloat) -> Void = { _ in }
 
-    /// ⚠️ 自定义手势只接受「手指」触摸，刻意排除 Apple Pencil
+    /// 自定义手势只接受「手指」触摸，刻意排除 Apple Pencil
     static let fingerOnly: [NSNumber] = [
         NSNumber(value: UITouch.TouchType.direct.rawValue)
     ]
@@ -83,7 +83,6 @@ struct DrawingCanvas: UIViewRepresentable {
         scroll.isOpaque = false
         scroll.contentInsetAdjustmentBehavior = .never
 
-        // 外层滚动彻底关掉：单指 / 笔都不会把画布拖走
         scroll.isScrollEnabled = false
         scroll.bounces = false
         scroll.bouncesZoom = false
@@ -178,7 +177,7 @@ struct DrawingCanvas: UIViewRepresentable {
         scroll.addGestureRecognizer(twoPan)
         context.coordinator.twoFingerPan = twoPan
 
-        // MARK: 单指拖动 → 翻页（编辑界面已停用，见 syncPageGestures）
+        // MARK: 单指拖动 → 翻页（编辑界面已停用）
         let pagePan = UIPanGestureRecognizer(
             target: context.coordinator,
             action: #selector(Coordinator.handlePagePan(_:))
@@ -394,7 +393,7 @@ struct DrawingCanvas: UIViewRepresentable {
             context.coordinator.zoom(by: 1 / 1.3)
         }
 
-        // 手势开关（设置里那 5 个子开关 + 总开关）
+        // 手势开关
         let on = gesturesEnabled
         context.coordinator.twoFingerTap?.isEnabled = on && twoFingerUndo
         context.coordinator.rapidUndoGesture?.isEnabled = on && twoFingerLongPressUndo
@@ -409,6 +408,13 @@ struct DrawingCanvas: UIViewRepresentable {
 
         // 编辑界面不翻页
         context.coordinator.syncPageGestures()
+
+        // ⚠️ 兜底：只要没有正在进行的缩放 / 平移，
+        //    绘制手势必须是开着的。
+        //    （之前画完一笔后缩放失效，就是这里被卡住了）
+        if !context.coordinator.isTransforming {
+            context.coordinator.forceEnableDrawing()
+        }
     }
 
     // MARK: - 偏移换算
@@ -463,6 +469,9 @@ struct DrawingCanvas: UIViewRepresentable {
 
         private(set) var isPencilDrawing: Bool = false
 
+        /// 双指缩放 / 平移是否正在进行
+        private(set) var isTransforming: Bool = false
+
         var pagePanWanted: Bool = false
         var pageTapWanted: Bool = false
 
@@ -489,7 +498,6 @@ struct DrawingCanvas: UIViewRepresentable {
         private var rapidUndoTimer: Timer?
         private var pinchStartScale: CGFloat = 1
         private var panStartOffset: CGPoint = .zero
-        private var drawingSuspended = false
         private var resumeWorkItem: DispatchWorkItem?
 
         private var lastReportedRatio: CGFloat = -1
@@ -509,17 +517,38 @@ struct DrawingCanvas: UIViewRepresentable {
             resumeWorkItem?.cancel()
         }
 
-        /// ⚠️ 编辑界面不翻页（用户要求）：单指翻页 / 边缘点击翻页一律停用。
+        /// 编辑界面不翻页：单指翻页 / 边缘点击翻页一律停用
         func syncPageGestures() {
             pagePan?.isEnabled = false
             pageTap?.isEnabled = false
         }
 
-        // MARK: 触摸过滤
+        // MARK: 缩放 / 平移期间临时收起绘制手势
         //
-        // 「大面积接触」只用来挡「拖动 / 缩放」——
-        // 双指轻点撤回、三指重做、四指清空是**点击**类手势，
-        // 一旦也按面积过滤，手指稍微压一点就会被拒掉，手势就不认了。
+        // ⚠️ 必须成对调用；万一有哪次没配上，
+        //    updateUIView 里的兜底会把它打开。
+
+        func beginTransform() {
+            guard !isTransforming else { return }
+            isTransforming = true
+            canvas?.drawingGestureRecognizer.isEnabled = false
+        }
+
+        func endTransform() {
+            guard isTransforming else { return }
+            isTransforming = false
+            canvas?.drawingGestureRecognizer.isEnabled = true
+        }
+
+        /// 兜底：确保绘制手势是开着的
+        func forceEnableDrawing() {
+            guard let canvas else { return }
+            if !canvas.drawingGestureRecognizer.isEnabled {
+                canvas.drawingGestureRecognizer.isEnabled = true
+            }
+        }
+
+        // MARK: 触摸过滤
 
         func gestureRecognizer(_ g: UIGestureRecognizer,
                                shouldReceive touch: UITouch) -> Bool {
@@ -531,7 +560,7 @@ struct DrawingCanvas: UIViewRepresentable {
             // 其余都是我们自己的手势：只认手指，不要笔
             if touch.type != .direct { return false }
 
-            // 只有拖动 / 缩放才检查接触面积
+            // 只有拖动 / 缩放才检查接触面积（点击类不过滤，否则会失效）
             if g is UIPanGestureRecognizer || g is UIPinchGestureRecognizer {
                 if touch.majorRadius > DrawingCanvas.maxFingerRadius { return false }
             }
@@ -600,7 +629,7 @@ struct DrawingCanvas: UIViewRepresentable {
             switch g.state {
             case .began:
                 pinchStartScale = scroll.zoomScale
-                suspendDrawing(true)
+                beginTransform()
 
             case .changed:
                 let minS = scroll.minimumZoomScale
@@ -611,7 +640,7 @@ struct DrawingCanvas: UIViewRepresentable {
                 scroll.setZoomScale(clamped, animated: false)
 
             case .ended, .cancelled, .failed:
-                suspendDrawing(false)
+                endTransform()
                 if let s = self.scroll { reportZoom(s) }
 
             default:
@@ -627,7 +656,7 @@ struct DrawingCanvas: UIViewRepresentable {
             switch g.state {
             case .began:
                 panStartOffset = scroll.contentOffset
-                suspendDrawing(true)
+                beginTransform()
 
             case .changed:
                 let t = g.translation(in: scroll)
@@ -644,18 +673,11 @@ struct DrawingCanvas: UIViewRepresentable {
                 scroll.contentOffset = CGPoint(x: x, y: y)
 
             case .ended, .cancelled, .failed:
-                suspendDrawing(false)
+                endTransform()
 
             default:
                 break
             }
-        }
-
-        private func suspendDrawing(_ suspend: Bool) {
-            guard let canvas else { return }
-            guard drawingSuspended != suspend else { return }
-            drawingSuspended = suspend
-            canvas.drawingGestureRecognizer.isEnabled = !suspend
         }
 
         // MARK: 手指翻页（编辑界面已停用，保留实现）
@@ -715,6 +737,7 @@ struct DrawingCanvas: UIViewRepresentable {
 
         func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
             onDrawingStateChanged(false)
+
             resumeWorkItem?.cancel()
             let item = DispatchWorkItem { [weak self] in
                 self?.isPencilDrawing = false
