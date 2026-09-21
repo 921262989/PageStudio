@@ -127,18 +127,39 @@ struct SinglePageView: View {
             .frame(width: pageWidth, height: pageHeight)
             .overlay(alignment: .topLeading) {
                 if let spread = SpreadLayout.spread(containingPage: pageIndex, in: book) {
-                    let sides = SpreadLayout.visualSides(of: spread,
-                                                         binding: book.bindingDirection)
-                    let isRightSide = sides.right == pageIndex
 
-                    SpreadCanvasView(book: book,
-                                     spread: spread,
-                                     pageWidth: pageWidth,
-                                     pageHeight: pageHeight,
-                                     drawingRevision: drawingRevision,
-                                     showDrawing: showDrawing,
-                                     theme: theme)
-                        .offset(x: isRightSide ? -pageWidth : 0)
+                    if spread.fullSpreadPageIndex == pageIndex {
+                        // ⚠️ 这一页独占整个跨页：单页模式下要整体缩放显示。
+                        //    以前只按左右偏移，结果只显示中间那一半（左右各一半）。
+                        ZStack {
+                            SpreadCanvasView(book: book,
+                                             spread: spread,
+                                             pageWidth: pageWidth,
+                                             pageHeight: pageHeight,
+                                             drawingRevision: drawingRevision,
+                                             showDrawing: showDrawing,
+                                             theme: theme)
+                                .frame(width: pageWidth * 2, height: pageHeight)
+                                .scaleEffect(0.5)
+                        }
+                        .frame(width: pageWidth, height: pageHeight)
+                        .clipped()
+
+                    } else {
+                        let sides = SpreadLayout.visualSides(of: spread,
+                                                             binding: book.bindingDirection)
+                        let isRightSide = sides.right == pageIndex
+
+                        SpreadCanvasView(book: book,
+                                         spread: spread,
+                                         pageWidth: pageWidth,
+                                         pageHeight: pageHeight,
+                                         drawingRevision: drawingRevision,
+                                         showDrawing: showDrawing,
+                                         theme: theme)
+                            .offset(x: isRightSide ? -pageWidth : 0)
+                    }
+
                 } else {
                     let rule = PageRuleStore.load(for: book.id)
                     ZStack {
