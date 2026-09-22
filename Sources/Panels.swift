@@ -85,8 +85,7 @@ struct ThumbnailPanelView: View {
     @State private var confirmDelete = false
     @State private var toast: String? = nil
 
-    // 拖拽排序
-    @State private var draggingIndex: Int? = nil
+    /// 拖拽落点（用于高亮目标格）
     @State private var dropTarget: Int? = nil
 
     // 在某页后插入
@@ -219,29 +218,23 @@ struct ThumbnailPanelView: View {
     }
 
     // MARK: - 单元格
-    //
-    // ⚠️ 拆成几个小函数。之前拖拽、下拉、右键菜单全堆在一个表达式里，
-    //    Swift 的类型检查器会报 "unable to type-check in reasonable time"。
 
     @ViewBuilder
     private func cell(_ idx: Int) -> some View {
         let selected = selection.contains(idx)
-        let isDragging = (draggingIndex == idx)
         let isTarget = (dropTarget == idx)
 
         VStack(spacing: 6) {
-            thumbnail(idx: idx,
-                      selected: selected,
-                      isTarget: isTarget,
-                      isDragging: isDragging)
+            thumbnail(idx: idx, selected: selected, isTarget: isTarget)
             caption(idx: idx, isTarget: isTarget)
         }
         .contentShape(Rectangle())
         .onTapGesture { handleTap(idx) }
-        .onDrag {
-            draggingIndex = idx
-            return NSItemProvider(object: "\(idx)" as NSString)
-        } preview: {
+        // ⚠️ 拖出和放进必须用同一套 API。
+        //    之前拖出用 onDrag(NSItemProvider)、放进用 dropDestination(Transferable)，
+        //    两边载荷类型对不上 → 拖了放不下去，等于没有拖拽。
+        //    现在统一用 Transferable 这套。
+        .draggable("\(idx)") {
             dragPreview(idx: idx)
         }
         .dropDestination(for: String.self) { items, _ in
@@ -258,10 +251,7 @@ struct ThumbnailPanelView: View {
     }
 
     @ViewBuilder
-    private func thumbnail(idx: Int,
-                           selected: Bool,
-                           isTarget: Bool,
-                           isDragging: Bool) -> some View {
+    private func thumbnail(idx: Int, selected: Bool, isTarget: Bool) -> some View {
         PageThumbnailView(book: working,
                           pageIndex: idx,
                           width: 124,
@@ -281,7 +271,6 @@ struct ThumbnailPanelView: View {
                 }
             }
             .shadow(color: .black.opacity(0.12), radius: 3, y: 2)
-            .opacity(isDragging ? 0.35 : 1)
     }
 
     @ViewBuilder
@@ -301,8 +290,8 @@ struct ThumbnailPanelView: View {
                 .foregroundStyle(idx == currentPageIndex
                                  ? Color.accentColor : Color.secondary)
 
-            if draggingIndex != nil && isTarget {
-                Image(systemName: "arrow.right.to.line")
+            if isTarget {
+                Image(systemName: "arrow.down.to.line")
                     .font(.caption2)
                     .foregroundStyle(Color.accentColor)
             }
@@ -317,7 +306,7 @@ struct ThumbnailPanelView: View {
                           height: 92 * working.pageAspectRatio,
                           theme: theme)
             .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
-            .opacity(0.9)
+            .opacity(0.95)
     }
 
     @ViewBuilder
@@ -384,13 +373,12 @@ struct ThumbnailPanelView: View {
     }
 
     private func handleDrop(_ items: [String], onto idx: Int) -> Bool {
-        defer {
-            draggingIndex = nil
-            dropTarget = nil
-        }
+        defer { dropTarget = nil }
+
         guard let first = items.first,
               let from = Int(first),
               from != idx else { return false }
+
         movePage(from: from, to: idx)
         return true
     }
