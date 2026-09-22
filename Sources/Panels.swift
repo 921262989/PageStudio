@@ -158,8 +158,9 @@ struct ThumbnailPanelView: View {
         }
     }
 
-    @ViewBuilder
-    private var toolbarItems: some View {
+    // ⚠️ ToolbarItem 不是 View，必须用 @ToolbarContentBuilder
+    @ToolbarContentBuilder
+    private var toolbarItems: some ToolbarContent {
         ToolbarItem(placement: .navigationBarLeading) {
             if isSelecting {
                 Button("取消") { exitSelection() }
@@ -219,9 +220,8 @@ struct ThumbnailPanelView: View {
 
     // MARK: - 单元格
     //
-    // ⚠️ 拆成几个小函数。
-    //    之前拖拽、下拉、右键菜单全堆在一个表达式里，
-    //    Swift 的类型检查器直接报 "unable to type-check in reasonable time"。
+    // ⚠️ 拆成几个小函数。之前拖拽、下拉、右键菜单全堆在一个表达式里，
+    //    Swift 的类型检查器会报 "unable to type-check in reasonable time"。
 
     @ViewBuilder
     private func cell(_ idx: Int) -> some View {
