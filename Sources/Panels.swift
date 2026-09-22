@@ -1,5 +1,6 @@
 import SwiftUI
 import PencilKit
+import UniformTypeIdentifiers
 
 // MARK: - 页面缩略图
 
@@ -83,6 +84,16 @@ struct ThumbnailPanelView: View {
     @State private var confirmDelete = false
     @State private var toast: String? = nil
 
+    // 拖拽排序
+    @State private var draggingIndex: Int? = nil
+    @State private var dropTarget: Int? = nil
+
+    // 在某页后插入
+    @State private var insertAfterIndex: Int? = nil
+    @State private var showPhotoPicker = false
+    @State private var photoItems: [PhotosPickerItem] = []
+    @State private var isImporting = false
+
     private let columns = [GridItem(.adaptive(minimum: 118, maximum: 180), spacing: 14)]
 
     init(book: Book,
@@ -149,6 +160,14 @@ struct ThumbnailPanelView: View {
             } message: {
                 Text("笔迹是按「跨页位置」保存的。删除页面会改变后续页面与笔迹的对应关系。")
             }
+            .photosPicker(isPresented: $showPhotoPicker,
+                          selection: $photoItems,
+                          maxSelectionCount: 50,
+                          matching: .images)
+            .onChange(of: photoItems) { items in
+                guard !items.isEmpty else { return }
+                Task { await insertFromPhotos(items) }
+            }
             .overlay(alignment: .top) {
                 if let toast {
                     Text(toast)
@@ -161,6 +180,23 @@ struct ThumbnailPanelView: View {
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
             }
+            .overlay {
+                if isImporting {
+                    ZStack {
+                        Color.black.opacity(0.4).ignoresSafeArea()
+                        VStack(spacing: 12) {
+                            ProgressView()
+                            Text("正在插入…")
+                                .font(.footnote)
+                                .foregroundStyle(.white)
+                        }
+                        .padding(22)
+                        .background(.ultraThinMaterial,
+                                    in: RoundedRectangle(cornerRadius: 14,
+                                                         style: .continuous))
+                    }
+                }
+            }
         }
     }
 
@@ -169,6 +205,8 @@ struct ThumbnailPanelView: View {
     @ViewBuilder
     private func cell(_ idx: Int) -> some View {
         let selected = selection.contains(idx)
+        let isDragging = (draggingIndex == idx)
+        let isTarget = (dropTarget == idx)
 
         VStack(spacing: 6) {
             PageThumbnailView(book: working,
@@ -179,12 +217,10 @@ struct ThumbnailPanelView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        .stroke(selected
-                                ? Color.accentColor
-                                : (idx == currentPageIndex
-                                   ? Color.accentColor.opacity(0.45)
-                                   : Color.clear),
-                                lineWidth: selected ? 3 : 2)
+                        .stroke(borderColor(selected: selected,
+                                            isTarget: isTarget,
+                                            idx: idx),
+                                lineWidth: (selected || isTarget) ? 3 : 2)
                 )
                 .overlay(alignment: .topLeading) {
                     if isSelecting {
@@ -197,11 +233,20 @@ struct ThumbnailPanelView: View {
                     }
                 }
                 .shadow(color: .black.opacity(0.12), radius: 3, y: 2)
+                .opacity(isDragging ? 0.35 : 1)
 
-            Text("\(idx + 1)")
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(idx == currentPageIndex
-                                 ? Color.accentColor : Color.secondary)
+            HStack(spacing: 4) {
+                Text("\(idx + 1)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(idx == currentPageIndex
+                                     ? Color.accentColor : Color.secondary)
+
+                if draggingIndex != nil && isTarget {
+                    Image(systemName: "arrow.right.to.line")
+                        .font(.caption2)
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
         }
         .contentShape(Rectangle())
         .onTapGesture {
@@ -212,6 +257,36 @@ struct ThumbnailPanelView: View {
                 dismiss()
             }
         }
+        // 拖拽排序（单页移动；笔迹不动，就留在原来的跨页位置上）
+        .onDrag {
+            draggingIndex = idx
+            return NSItemProvider(object: "\(idx)" as NSString)
+        } preview: {
+            PageThumbnailView(book: working,
+                              pageIndex: idx,
+                              width: 92,
+                              height: 92 * working.pageAspectRatio,
+                              theme: theme)
+                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                .opacity(0.9)
+        }
+        .dropDestination(for: String.self) { items, _ in
+            defer {
+                draggingIndex = nil
+                dropTarget = nil
+            }
+            guard let first = items.first,
+                  let from = Int(first),
+                  from != idx else { return false }
+            movePage(from: from, to: idx)
+            return true
+        } isTargeted: { targeted in
+            if targeted {
+                dropTarget = idx
+            } else if dropTarget == idx {
+                dropTarget = nil
+            }
+        }
         .contextMenu {
             if !isSelecting {
                 Button {
@@ -219,6 +294,19 @@ struct ThumbnailPanelView: View {
                 } label: {
                     Label("在此页后插入空白页", systemImage: "plus.rectangle")
                 }
+                Button {
+                    beginInsertPhotos(after: idx)
+                } label: {
+                    Label("在此页后插入照片", systemImage: "photo.badge.plus")
+                }
+                Button {
+                    beginInsertFiles(after: idx)
+                } label: {
+                    Label("在此页后插入文件 / PDF", systemImage: "folder.badge.plus")
+                }
+
+                Divider()
+
                 Button {
                     addToOutline([idx])
                 } label: {
@@ -230,7 +318,9 @@ struct ThumbnailPanelView: View {
                 } label: {
                     Label("开始选择", systemImage: "checkmark.circle")
                 }
+
                 Divider()
+
                 Button(role: .destructive) {
                     selection = [idx]
                     confirmDelete = true
@@ -240,6 +330,13 @@ struct ThumbnailPanelView: View {
             }
         }
         .id(idx)
+    }
+
+    private func borderColor(selected: Bool, isTarget: Bool, idx: Int) -> Color {
+        if selected { return Color.accentColor }
+        if isTarget { return Color.accentColor }
+        if idx == currentPageIndex { return Color.accentColor.opacity(0.45) }
+        return .clear
     }
 
     // MARK: - 底部批量操作栏
@@ -273,7 +370,7 @@ struct ThumbnailPanelView: View {
         .background(.bar)
     }
 
-    // MARK: - 操作
+    // MARK: - 选择
 
     private func toggleSelection(_ idx: Int) {
         if selection.contains(idx) {
@@ -288,14 +385,167 @@ struct ThumbnailPanelView: View {
         selection.removeAll()
     }
 
-    private func insertBlank(after idx: Int) {
-        guard working.pages.indices.contains(idx) else { return }
+    // MARK: - 拖拽排序
+
+    /// 单页移动：只改 pages 的顺序，不动 Drawings 里的笔迹。
+    private func movePage(from: Int, to: Int) {
+        guard working.pages.indices.contains(from),
+              working.pages.indices.contains(to),
+              from != to else { return }
+
         var updated = working
-        updated.pages.insert(Page.blank(), at: idx + 1)
+        let page = updated.pages.remove(at: from)
+        let clamped = min(max(to, 0), updated.pages.count)
+        updated.pages.insert(page, at: clamped)
+
         working = updated
         onChange(updated)
-        showToast("已插入空白页")
+        showToast("第 \(from + 1) 页 → 第 \(to + 1) 位")
     }
+
+    // MARK: - 插入
+
+    private func insertBlank(after idx: Int) {
+        insertPages([Page.blank()], after: idx)
+    }
+
+    private func beginInsertPhotos(after idx: Int) {
+        insertAfterIndex = idx
+        photoItems = []
+        showPhotoPicker = true
+    }
+
+    private func beginInsertFiles(after idx: Int) {
+        insertAfterIndex = idx
+
+        DocumentPickerService.present(types: [.image, .pdf],
+                                      allowsMultiple: true) { urls in
+            guard !urls.isEmpty else { return }
+            Task { await insertFromFiles(urls) }
+        }
+    }
+
+    private func insertFromPhotos(_ items: [PhotosPickerItem]) async {
+        guard let target = insertAfterIndex else { return }
+        defer {
+            photoItems = []
+            insertAfterIndex = nil
+        }
+
+        await MainActor.run { isImporting = true }
+
+        var newPages: [Page] = []
+        for item in items {
+            guard let data = try? await item.loadTransferable(type: Data.self) else {
+                continue
+            }
+            let ext = ImageFileType.fileExtension(for: data)
+            if let name = try? FileStorage.saveImageData(data,
+                                                         preferredExtension: ext) {
+                newPages.append(Page.image(fileName: name))
+            }
+        }
+
+        await MainActor.run {
+            isImporting = false
+            guard !newPages.isEmpty else {
+                showToast("没有读到照片")
+                return
+            }
+            insertPages(newPages, after: target)
+        }
+    }
+
+    private func insertFromFiles(_ urls: [URL]) async {
+        guard let target = insertAfterIndex else { return }
+        await MainActor.run { insertAfterIndex = nil }
+
+        await MainActor.run { isImporting = true }
+
+        var newPages: [Page] = []
+
+        for url in urls {
+            let accessing = url.startAccessingSecurityScopedResource()
+            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+
+            let ext = url.pathExtension.lowercased()
+
+            if ext == "pdf" {
+                let dest = FileStorage.documents
+                    .appendingPathComponent("insert-\(UUID().uuidString).pdf")
+                guard (try? FileManager.default.copyItem(at: url, to: dest)) != nil else {
+                    continue
+                }
+
+                let total = PDFImporter.pageCount(url: dest)
+                for i in 0..<total {
+                    let page: Page? = await withCheckedContinuation { cont in
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            autoreleasepool {
+                                guard let image = PDFImporter.renderPage(url: dest,
+                                                                         index: i,
+                                                                         maxPixel: 2400),
+                                      let data = image.jpegData(compressionQuality: 0.9),
+                                      let name = try? FileStorage.saveImageData(
+                                          data,
+                                          preferredExtension: "jpg"
+                                      ) else {
+                                    cont.resume(returning: nil)
+                                    return
+                                }
+                                cont.resume(returning: Page.image(fileName: name))
+                            }
+                        }
+                    }
+                    if let page { newPages.append(page) }
+                }
+
+                try? FileManager.default.removeItem(at: dest)
+                continue
+            }
+
+            guard let data = try? Data(contentsOf: url) else { continue }
+            let fileExt = ext.isEmpty
+                ? ImageFileType.fileExtension(for: data)
+                : ext
+
+            if let name = try? FileStorage.saveImageData(data,
+                                                         preferredExtension: fileExt) {
+                newPages.append(Page.image(fileName: name))
+            }
+        }
+
+        await MainActor.run {
+            isImporting = false
+            guard !newPages.isEmpty else {
+                showToast("没有插入任何内容")
+                return
+            }
+            insertPages(newPages, after: target)
+        }
+    }
+
+    /// 在指定页之后插入若干页；大纲里在该页之后的条目页码整体后移。
+    private func insertPages(_ pages: [Page], after idx: Int) {
+        guard working.pages.indices.contains(idx), !pages.isEmpty else { return }
+
+        var updated = working
+        updated.pages.insert(contentsOf: pages, at: idx + 1)
+
+        updated.outline = updated.outline.map { item in
+            var it = item
+            if item.pageIndex > idx {
+                it.pageIndex += pages.count
+            }
+            return it
+        }
+
+        working = updated
+        onChange(updated)
+        showToast("已插入 \(pages.count) 页")
+    }
+
+    // MARK: - 大纲 / 删除
 
     private func addToOutline(_ indices: [Int]) {
         guard !indices.isEmpty else { return }
